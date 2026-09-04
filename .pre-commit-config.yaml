@@ -33,3 +33,41 @@ repos:
       - id: cargo-deny
       - id: observe-coverage
       - id: helm-lint
+
+  # THE RUSTDOC GATE, AND IT IS LOCAL BECAUSE IT IS ABOUT THIS CRATE'S FEATURE
+  # SPLIT. `yadgarhq/actions` ships no `cargo doc` hook and no workflow step runs
+  # one, so before this block NOTHING in the estate looked at rustdoc at all:
+  # measured on 2026-09-04 by changing one backtick in `src/lib.rs` to an
+  # intra-doc link and running the whole suite — `cargo clippy --all-targets
+  # --all-features -- -D warnings` exits 0 and every hook above passes, while
+  # `cargo doc` fails with `unresolved link to rotate::watch`. Clippy does not
+  # check intra-doc links; only rustdoc does.
+  #
+  # BOTH FEATURE SETS, and that is the whole reason there are two entries rather
+  # than one. `rotate` is `#[cfg(feature = "rotate")]`, so:
+  #
+  #   - with the feature OFF the module is absent, which is the build where a
+  #     link INTO it is broken — the failure `src/lib.rs` writes every
+  #     `rotate::*` name in plain backticks to avoid;
+  #   - with the feature ON the module is present, and it is the ONLY build that
+  #     reads `src/rotate.rs`'s own doc comments at all. An off-build-only gate
+  #     would look like rustdoc coverage while every link inside that file
+  #     shipped unchecked.
+  #
+  # `env` rather than a shell: pre-commit exec's `entry` without one, so a bare
+  # `RUSTDOCFLAGS=... cargo` prefix would be read as a program name.
+  - repo: local
+    hooks:
+      - id: cargo-doc-default
+        name: rustdoc (default features)
+        language: system
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features
+        pass_filenames: false
+        files: \.(rs|toml)$
+
+      - id: cargo-doc-no-default-features
+        name: rustdoc (--no-default-features)
+        language: system
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --no-default-features
+        pass_filenames: false
+        files: \.(rs|toml)$

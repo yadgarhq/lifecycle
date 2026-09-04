@@ -17,9 +17,19 @@
 //!
 //! **Every `rotate::*` name in these crate docs is written in plain backticks
 //! rather than as an intra-doc link, and deliberately.** A link to an item
-//! behind a `cfg` is a broken link in the build where the `cfg` is off, and
-//! `RUSTDOCFLAGS="-D warnings" cargo doc --no-default-features` is one of this
-//! repository's gates. Suppressing the lint would hide the next real one.
+//! behind a `cfg` is a broken link in the build where the `cfg` is off.
+//! Suppressing the lint would hide the next real one.
+//!
+//! **THE GATE THAT MAKES THAT A RULE RATHER THAN A HABIT IS THE
+//! `cargo-doc-no-default-features` HOOK IN `.pre-commit-config.yaml`**, and it
+//! is named here rather than merely asserted because this paragraph used to
+//! assert a gate that did not exist. It said `RUSTDOCFLAGS="-D warnings" cargo
+//! doc --no-default-features` was "one of this repository's gates". Measured on
+//! 2026-09-04: no workflow, hook or script in ANY repository of this estate ran
+//! `cargo doc` at all, under any feature set. So the convention this paragraph
+//! justifies was held by nothing but attention, and the justification was the
+//! load-bearing part. CI runs `pre-commit` in the job the branch ruleset
+//! requires, so the hook is a blocking check rather than a local habit.
 //!
 //! # Why this is a crate rather than a file each service owns
 //!

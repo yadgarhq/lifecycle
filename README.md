@@ -151,6 +151,11 @@ tests/arming.rs     WHEN the handlers are installed — a SIGTERM into an un-pol
 
 `tests/rotation.rs` and `tests/assembly.rs` declare `required-features = ["rotate"]`, so `cargo test --no-default-features` skips them rather than failing to compile. Cargo forbids an optional dev-dependency, so the gate removes a consumer's cost and not a test build's.
 
-**CI runs `cargo test --all-features` and nothing else, so the feature-off build is checked by hand and by nobody else.** A change that made `src/drain.rs` reach for `sha2` would pass every check on the pull request and break the next consumer that turned the watcher off. Run `cargo test --no-default-features` and `cargo clippy --all-targets --no-default-features -- -D warnings` before proposing a change to `src/drain.rs` or to `Cargo.toml`.
+**The feature-off build IS checked now, and this paragraph used to say it was not.** It read "CI runs `cargo test --all-features` and nothing else, so the feature-off build is checked by hand and by nobody else", and `yadgarhq/actions` v1.10.0 made that false: the shared `test` job reads `cargo metadata`, finds that this package declares a feature, and runs `cargo test --no-default-features` after the `--all-features` suite. The failure the old paragraph named — a change making the ungated `src/drain.rs` reach for `sha2`, a `rotate`-only dependency — is the exact one that step was written for, and it is now caught on the pull request.
+
+Two holes are left, and they are narrower than the sentence they replace:
+
+- **Clippy still sees only one build.** The shared `cargo-clippy` hook is `--all-targets --all-features`, so a lint that fires only with the feature off ships green. Run `cargo clippy --all-targets --no-default-features -- -D warnings` before proposing a change to `src/drain.rs` or to `Cargo.toml`.
+- **Rustdoc is covered here and nowhere else.** No workflow or shared hook in the estate runs `cargo doc` under any feature set, so this repository carries the two `cargo-doc-*` hooks in its own `.pre-commit-config.yaml` — one per feature set, because each build reads doc comments the other cannot see. See the crate docs in `src/lib.rs` for why the `--no-default-features` half is the one the backtick convention depends on.
 
 There is no `Containerfile` and no `chart/`. This is a library: `ci-release` publishes nothing, and **the git tag is the release**.
