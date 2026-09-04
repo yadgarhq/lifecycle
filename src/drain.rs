@@ -9,7 +9,7 @@
 //!
 //! **[`DRAIN_BUDGET`] and [`drain_within`] belong beside it rather than in a
 //! module of their own**, because they arrived with the rotation watcher and
-//! for its sake. Once [`crate::rotate::watch`] can end the serving future on
+//! for its sake. Once `crate::rotate::watch` can end the serving future on
 //! its own, outside any signal, `terminationGracePeriodSeconds` never runs —
 //! kubelet started no drain and its clock never starts. Worse, tokio never
 //! unregisters a libc signal handler, so once a non-signal arm wins the
@@ -22,7 +22,7 @@ use std::time::Duration;
 ///
 /// **NOTHING OUTSIDE THIS PROCESS WILL END A SELF-INITIATED DRAIN, and that is
 /// what makes this necessary rather than tidy.** `terminationGracePeriodSeconds`
-/// bounds a drain KUBELET started; when [`crate::rotate::watch`] ends the serve,
+/// bounds a drain KUBELET started; when `crate::rotate::watch` ends the serve,
 /// kubelet started nothing and its clock never runs. There is no
 /// `Server::timeout`, no deadline on an upstream channel, and no liveness probe.
 /// One request blocked on a responsive-but-slow upstream would otherwise leave
@@ -121,8 +121,19 @@ pub async fn drain_within<T>(
 /// is first polled, so a signal arriving in the window between binding the
 /// listener and the executor reaching the shutdown future would kill the process
 /// outright — the precise failure this exists to prevent, reintroduced as a
-/// race. `tests/shutdown.rs` raises SIGTERM after this call and before the
-/// future is awaited, so that window is what it measures.
+/// race. `tests/arming.rs` is the file that measures it: it calls this, NEVER
+/// polls what it returned, raises SIGTERM into that gap, and then polls. Lazy
+/// arming does not fail an assertion there — the test binary is gone on signal
+/// 15, which is the production failure in miniature.
+///
+/// **`tests/shutdown.rs` does NOT measure that window, and this comment used to
+/// say it did.** That rig waits for its port to accept before raising the
+/// signal, and a port that accepts belongs to a task the executor has already
+/// polled — so the handlers are installed by then either way. A mutant moving
+/// both `signal()` calls inside the returned future survived that file, this
+/// crate's whole suite, and the suites of two services that had adopted it.
+/// What `tests/shutdown.rs` proves is the other half, and it is worth as much:
+/// that a real SIGTERM reaches a real drain rather than only a handler.
 ///
 /// # Errors
 ///

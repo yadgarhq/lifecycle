@@ -97,19 +97,38 @@ Per ADR-0526, an in-org crate is pinned by a published tag, never a bare revisio
 yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle", tag = "v0.1.0" }
 ```
 
-Nothing depends on this crate yet. Adoption is a separate, reviewed change per repository.
+Five repositories pin it: `iam`, `task`, `gateway`, `iam-db` and `task-db`. Each adoption is a separate, reviewed change.
+
+### Features
+
+| feature  | default | what it carries                                          |
+| -------- | ------- | -------------------------------------------------------- |
+| `rotate` | on      | `rotate::watch` and everything that parses a certificate |
+
+`shutdown`, `drain_within` and `DRAIN_BUDGET` are always present. A service that only wants to hear SIGTERM adds `default-features = false` to the dependency above.
+
+**`v0.1.0` — the tag in the block above — PREDATES the feature, and `default-features = false` against it is silently a no-op rather than an error.** A service turning the watcher off must first move its pin to the tag this change cuts, because a published tag never moves (ADR-0526). Cargo will not warn about the mismatch; the build simply keeps everything.
+
+**Measured with `cargo tree -e normal`, not estimated: 54 crates with the feature and 16 without it.** The 38 that go are `x509-parser` over `asn1-rs`, `der-parser`, `oid-registry`, `nom` and their tree, plus `sha2`, `thiserror` and the `metrics` facade. `iam-db` and `task-db` call `shutdown` and nothing else, and paid for all 38.
+
+There is no `drain` feature, and that is a measurement rather than a taste: `src/drain.rs` reaches for `tokio` and `tracing` alone, both of which `rotate` needs anyway, so gating it would drop **zero** crates while admitting a build of this crate with no public items in it.
 
 ## Layout
 
 ```
 src/lib.rs          crate docs and the re-exports
-src/rotate.rs       Schedule, Material, File, Inputs, watch
+src/rotate.rs       Schedule, Material, File, Inputs, watch  (feature `rotate`)
 src/drain.rs        DRAIN_BUDGET, Drain, drain_within, shutdown
 tests/common/       the kubelet-shaped mount, and stand-ins for a service's config types
 tests/rotation.rs   the watcher against real atomic ..data swaps
 tests/assembly.rs   the watch set as a value — the seam this crate exists for
 tests/drain.rs      when the budget's clock starts
-tests/shutdown.rs   a real SIGTERM to this process
+tests/shutdown.rs   a real SIGTERM to this process, and the drain it reaches
+tests/arming.rs     WHEN the handlers are installed — a SIGTERM into an un-polled future
 ```
+
+`tests/rotation.rs` and `tests/assembly.rs` declare `required-features = ["rotate"]`, so `cargo test --no-default-features` skips them rather than failing to compile. Cargo forbids an optional dev-dependency, so the gate removes a consumer's cost and not a test build's.
+
+**CI runs `cargo test --all-features` and nothing else, so the feature-off build is checked by hand and by nobody else.** A change that made `src/drain.rs` reach for `sha2` would pass every check on the pull request and break the next consumer that turned the watcher off. Run `cargo test --no-default-features` and `cargo clippy --all-targets --no-default-features -- -D warnings` before proposing a change to `src/drain.rs` or to `Cargo.toml`.
 
 There is no `Containerfile` and no `chart/`. This is a library: `ci-release` publishes nothing, and **the git tag is the release**.
