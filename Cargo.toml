@@ -1,0 +1,53 @@
+[package]
+name = "yadgar-lifecycle"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "How a server process starts, stops and restarts: ADR-0523's exit-on-change rotation watcher, the SIGTERM drain, and the budget that bounds it."
+
+[dependencies]
+# NO TRANSPORT, DELIBERATELY. `drain_within` is generic over a
+# `tokio::task::JoinHandle`, so it bounds a tonic server, an axum server or a
+# bare accept loop without naming any of them. A lifecycle crate that pulled in
+# a gRPC stack would make every adopter pay for one.
+tokio = { version = "1", features = ["macros", "rt", "signal", "sync", "time"] }
+tracing = "0.1"
+thiserror = "2"
+sha2 = "0.10"
+# PEM to DER and no further, which is all the watcher needs to fingerprint a
+# leaf. The same parser tonic and rustls use, so "the first certificate in this
+# file" means the same thing here as it does to the listener.
+rustls-pki-types = { version = "1", features = ["std"] }
+# For `validity().not_after` ALONE. `rustls-pki-types` decodes PEM to DER and
+# stops there; nothing in the rustls tree will read an expiry out of the result.
+x509-parser = "0.18"
+# The metrics FACADE only, for the same reason `yadgar-telemetry` states: a
+# library that installs an exporter decides the backend for every service that
+# links it. The binary installs one.
+metrics = "0.24"
+
+[dev-dependencies]
+# `test-util` for a paused clock, `net` for the drain rig's real listener.
+tokio = { version = "1", features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "test-util",
+] }
+# Certificates are MINTED PER RUN rather than checked in: a fixture key in the
+# repository is a secret in the repository, and it expires on a date nobody is
+# watching.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+# `DebuggingRecorder` + `with_local_recorder`: the only way to assert that the
+# metric NAME a dashboard queries and the value the gauge receives are what this
+# crate claims. MUST resolve against `metrics 0.24` — a metrics-util built on
+# another major links a SECOND facade, and then the snapshot is empty while
+# every assertion still compiles and passes.
+metrics-util = { version = "0.20", features = ["debugging"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

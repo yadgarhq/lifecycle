@@ -1,0 +1,50 @@
+//! How a server process starts, stops and restarts.
+//!
+//! Three units live here, and they are ONE unit rather than three that happen
+//! to share a crate. [`rotate::watch`] resolves when the security material this
+//! process read at boot changes on disk; the caller selects on it beside
+//! [`shutdown`]; and whichever arm wins, [`drain_within`] bounds the drain that
+//! follows. Lifting any one of them alone would put a single control flow
+//! across a crate boundary.
+//!
+//! # Why this is a crate rather than a file each service owns
+//!
+//! It was a file each service owned, and the copies had already begun to drift.
+//! Measured on 2026-09-04, before this crate existed:
+//!
+//! | unit | copies |
+//! | --- | --- |
+//! | the rotation watcher | 3 — `iam`, `task`, `gateway` |
+//! | `shutdown` | 5 — the three above, plus `iam-db` and `task-db` |
+//! | `DRAIN_BUDGET` + `drain_within` | 3 — `iam`, `task`, `gateway` |
+//!
+//! The watcher's three copies were identical apart from a service name, one
+//! type's spelling, and which of the per-role builders each service called.
+//! `shutdown`'s five were byte-identical in four repos and a near-copy with a
+//! different error type in the fifth. ADR-0523 says so in its own consequences:
+//! *"the watcher core is repo-agnostic and is about to exist in four copies;
+//! lift it into a shared crate before the third."*
+//!
+//! # THE REASON THAT IS WORTH MORE THAN DE-DUPLICATION
+//!
+//! **The watch set was assembled in `main.rs`, where no test can reach it.**
+//! Every service built its `Inputs` as a run of builder calls interleaved with
+//! boot, and no test spawns the binary — so deleting one of those calls
+//! compiled, passed the whole suite, and shipped a process that would never
+//! notice that file rotating. Eight such calls stand across three `main.rs`
+//! files: four in `iam`, two in `task`, two in `gateway`. Not one of them is
+//! killable.
+//!
+//! [`rotate::Inputs::of`] is the answer: the watch set becomes a VALUE — a list
+//! of things that implement [`rotate::Material`] — rather than a sequence of
+//! statements. A value can be returned from a function in a service's library,
+//! and a function in a library is something a test can call and assert against.
+//! What remains in `main.rs` is one expression naming the list, and the fold
+//! over it is tested here.
+//!
+//! See the README for what that does and does not close.
+
+pub mod drain;
+pub mod rotate;
+
+pub use drain::{drain_within, shutdown, Drain, DRAIN_BUDGET};
