@@ -70,6 +70,28 @@ impl Material for ServerTls {
 
 `Option<M>`, `&M`, `Path` and `PathBuf` implement `Material` too, so an opt-in setting that is off contributes nothing without a branch at the call site.
 
+### A file the watcher cannot read
+
+**Every watched file is watched on its own, and one the process cannot read disables nothing but itself.** It did not used to be. The baseline collected `Option<[u8; 32]>` into an `Option<Vec<_>>`, so a single unreadable file collapsed the whole set to `None` and the watcher waited forever behind one `warn!`. Rotation then went unnoticed for every other file — seven of them in a service like `iam` — and the pod served its day-0 leaf until the certificate expired. The same collapse sat on the polling side, where one file going away made every poll skip the six still rotating perfectly well.
+
+Three states, and the DIRECTION is what separates them:
+
+| at boot            | now             | what happens                                                     |
+| ------------------ | --------------- | ---------------------------------------------------------------- |
+| read               | different bytes | a rotation: splay, then end the watch                            |
+| **could not read** | **readable**    | a rotation. The process is running on material it never loaded   |
+| read               | cannot be read  | **not** a change. Transient; keep what was loaded, keep watching |
+
+The second row is not new policy. The per-file comparison already answered "changed" for a file with no baseline that now reads; the collapse is what made that answer unreachable. It also settles _"is an unreadable file permanent?"_ by measurement rather than by guess: a late mount resolves itself, because the process exits once and the replacement takes a real baseline, while a genuinely wrong path never becomes readable and so never fires it.
+
+**A path the deployment named and the process could not read is a configuration defect, so it is logged at `error!` at boot** — a different fact from the loop's transient `warn!`, separated by level so a reader can tell them apart. The loop's warning fires when the unreadable SET changes rather than on every poll, because a standing condition belongs in a gauge and a transition belongs in a log.
+
+`yadgar_rotation_watched_files_unreadable` carries how many watched files cannot be read, labelled by `service` and by nothing per-path — a path label would make this metric's cardinality a property of a deployment's configuration. It is written on every poll **including when it is zero**, which is the opposite call from the expiry gauge and deliberately so: an expiry for a certificate that was never loaded would be an invented number, whereas "none of the watched files is unreadable" is the measurement, and a series that appears only once something is wrong cannot be told apart from an exporter that is not running.
+
+**The one case that emits nothing is an EMPTY watch set**, where the watcher never reaches its loop: nothing was read, so there is nothing that can be unreadable, and a deployment with every TLS setting off is the ordinary case rather than a broken one. `Inputs::export_unreadable()` still publishes a zero if a caller asks it directly.
+
+**The gauge is a capability rather than a live signal until the pins move.** Five repositories still pin `v0.1.0`, and adoption is a separate change per ADR-0526 — so until then the only loudness that reaches an operator is the log line.
+
 The per-service differences the old copies carried are gone:
 
 - the **`SERVICE` constant** is now `Inputs::new(service)` / `Inputs::of(service, ..)`, stored once;

@@ -26,7 +26,9 @@ use common::{
     generation, with_exchanged, with_replaced, Generation, Mount, CA_NOT_AFTER, CLIENT_NOT_AFTER,
     LEAF_NOT_AFTER, NAMES,
 };
-use yadgar_lifecycle::rotate::{self, Inputs, Presented, Schedule, CERTIFICATE_NOT_AFTER};
+use yadgar_lifecycle::rotate::{
+    self, Inputs, Presented, Schedule, CERTIFICATE_NOT_AFTER, WATCHED_FILES_UNREADABLE,
+};
 
 /// The label every gauge in this suite carries.
 const SERVICE: &str = "lifecycle-test";
@@ -130,6 +132,119 @@ async fn a_mount_that_cannot_be_read_does_not_end_the_watch() {
             .is_err(),
         "an unreadable file is not a changed one; the process must keep serving what it loaded"
     );
+}
+
+/// A path the deployment named and this process could NOT read at boot.
+///
+/// It resolves to nothing, so `also` records `loaded: None` for it, and it stays
+/// in the watch set — which is where the collapse lives.
+fn absent(mount: &Mount) -> std::path::PathBuf {
+    mount.path("never-written.pem")
+}
+
+/// **ONE UNREADABLE FILE MUST NOT DISABLE THE WHOLE WATCH SET, and this is the
+/// case the crate shipped wrong.** `baseline()` collected `Option<[u8; 32]>` into
+/// `Option<Vec<_>>`, so a single `None` collapsed the entire set and
+/// `watch_with_seed` took `never()` for the life of the process behind one
+/// `warn!`. Rotation then went unnoticed for every OTHER file — seven of them in
+/// a service like `iam` — and the pod served its day-0 leaf until the
+/// certificate expired.
+///
+/// The listener's certificate here is rotated on its own while the other watched
+/// files are left byte-identical, so nothing but that file can be ending this
+/// watch.
+#[tokio::test]
+async fn one_file_unreadable_at_boot_does_not_disable_the_files_that_are_readable() {
+    let base = generation("yadgar");
+    let mount = Arc::new(Mount::new(&base));
+    let missing = absent(&mount);
+    let listener = mount.listener();
+    let watched = Inputs::of(SERVICE, &[&listener, &missing]);
+    assert!(
+        watched.watched().contains(&missing.as_path()),
+        "the unreadable path must stay IN the set; dropping it is a different bug"
+    );
+
+    let fresh = generation("yadgar");
+    let replacement = fresh
+        .iter()
+        .find(|(n, _)| n == "tls.pem")
+        .map(|(_, c)| c.clone())
+        .expect("the fresh generation holds that file");
+    swap_shortly(&mount, with_replaced(&base, "tls.pem", &replacement));
+
+    timeout(GENEROUS, rotate::watch_with_seed(watched, at_once(POLL), 0))
+        .await
+        .expect("one file that could not be read must not stop the rest being watched");
+}
+
+/// **A FILE THAT WAS UNREADABLE AT BOOT AND IS READABLE NOW HAS CHANGED**, and
+/// the change is the one that matters most: the process is running on material
+/// it never loaded at all.
+///
+/// This is not new policy. `differing()` ALREADY answers "changed" for a file
+/// whose baseline is `None` and whose disk reading is `Some` — the collapse in
+/// `baseline()` is what made that answer unreachable. Removing the collapse
+/// makes the module's existing rule apply rather than inventing one.
+///
+/// It also settles "is an unreadable file permanent?" by measurement instead of
+/// by guess. A late mount resolves itself: the process exits once, and the
+/// replacement takes a real baseline. A genuinely wrong path never becomes
+/// readable, so this never fires and the gauge below is what says so.
+#[tokio::test]
+async fn a_file_that_could_not_be_read_at_boot_ends_the_watch_when_it_appears() {
+    let mount = Arc::new(Mount::new(&generation("yadgar")));
+    let missing = absent(&mount);
+    let listener = mount.listener();
+    let watched = Inputs::of(SERVICE, &[&listener, &missing]);
+
+    let appears = missing.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(POLL * 4).await;
+        std::fs::write(&appears, "material this process never loaded\n").unwrap();
+    });
+
+    timeout(GENEROUS, rotate::watch_with_seed(watched, at_once(POLL), 0))
+        .await
+        .expect("a file the process could not read, which now holds bytes, is a change");
+}
+
+/// The SAME collapse on the polling side, reached later.
+///
+/// `on_disk()` collected the same way, so one file becoming unreadable made
+/// every poll `continue` — and the six files still rotating perfectly well went
+/// unnoticed for as long as that one stayed gone. Only ONE file is removed here;
+/// the other six keep resolving through an untouched `..data`.
+///
+/// The transient rule is kept and is what
+/// [`a_mount_that_cannot_be_read_does_not_end_the_watch`] pins: a file that goes
+/// from readable to unreadable is NOT a change, because that is the state
+/// kubelet passes through. What changes is that it no longer silences the rest.
+#[tokio::test]
+async fn one_file_becoming_unreadable_does_not_disable_the_files_that_are_readable() {
+    let base = generation("yadgar");
+    let mount = Arc::new(Mount::new(&base));
+    let watched = inputs(&mount);
+
+    let gone = mount.path("ca.pem");
+    let swapper = Arc::clone(&mount);
+    let fresh = generation("yadgar");
+    let replacement = fresh
+        .iter()
+        .find(|(n, _)| n == "tls.pem")
+        .map(|(_, c)| c.clone())
+        .expect("the fresh generation holds that file");
+    let rotated = with_replaced(&base, "tls.pem", &replacement);
+    tokio::spawn(async move {
+        tokio::time::sleep(POLL * 4).await;
+        std::fs::remove_file(&gone).unwrap();
+        tokio::time::sleep(POLL * 4).await;
+        swapper.swap(&rotated);
+    });
+
+    timeout(GENEROUS, rotate::watch_with_seed(watched, at_once(POLL), 0))
+        .await
+        .expect("one file that went away must not stop the other six being watched");
 }
 
 /// THE DEFAULT. Every TLS setting in this estate is opt-in and off, so nothing
@@ -305,6 +420,99 @@ fn the_expiry_is_exported_under_the_name_a_dashboard_queries() {
         ],
         "each gauge carries the expiry of the leaf it names, and the two are not \
          interchangeable: an expired CLIENT leaf STOPS this hop (ADR-0516)"
+    );
+}
+
+/// The gauge that makes the WATCHER'S OWN failure visible, under the name and
+/// labels a dashboard queries.
+///
+/// **A CHARACTERIZATION TEST, and it passed the moment it was written** — the
+/// name and the label set are the interface, not a behaviour derived from
+/// anything. Its RED comes from mutation instead: misspell the constant, or
+/// publish a constant `0` in place of the count, and this is what dies.
+///
+/// The ZERO half is the load-bearing one and is a DELIBERATE departure from
+/// [`no_certificate_exports_no_gauge`] below. An expiry for a certificate the
+/// process never loaded would be invented. "None of the watched files is
+/// unreadable" is measured — and a series that only appears once something is
+/// wrong cannot be told apart from an exporter that is not running.
+#[test]
+fn the_unreadable_count_is_exported_under_the_name_a_dashboard_queries() {
+    assert_eq!(
+        WATCHED_FILES_UNREADABLE, "yadgar_rotation_watched_files_unreadable",
+        "the name is an interface to Grafana; renaming it blanks the panel"
+    );
+
+    let mount = Mount::new(&generation("yadgar"));
+    let missing = mount.path("never-written.pem");
+    let listener = mount.listener();
+
+    // Two watched files, exactly one of which cannot be read — so a gauge
+    // reporting "the size of the set" or "one if any" lands on a different
+    // number than a gauge reporting the count.
+    let watched = Inputs::of(SERVICE, &[&listener, &missing]);
+    assert_eq!(
+        watched.watched().len(),
+        3,
+        "a cert, its key, and the absent one"
+    );
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter: Snapshotter = recorder.snapshotter();
+    let named = metrics::with_local_recorder(&recorder, || watched.export_unreadable());
+    assert_eq!(
+        named,
+        vec![missing.display().to_string()],
+        "the paths are NAMED to the caller; only the count goes in the label-free gauge"
+    );
+
+    let emitted = snapshotter.snapshot().into_vec();
+    // A metrics-util built against another `metrics` major links a SECOND
+    // facade: everything compiles, nothing is captured, and every assertion
+    // below would pass vacuously against an empty snapshot.
+    assert_eq!(
+        emitted.len(),
+        1,
+        "one gauge — check for a duplicate `metrics` crate"
+    );
+    let (composite, _unit, _description, value) = &emitted[0];
+    let key = composite.key();
+    assert_eq!(key.name(), WATCHED_FILES_UNREADABLE);
+    assert_eq!(
+        key.labels()
+            .map(|l| (l.key().to_string(), l.value().to_string()))
+            .collect::<Vec<_>>(),
+        vec![("service".to_string(), SERVICE.to_string())],
+        "the service and NOTHING per-path: a path label makes the cardinality a \
+         property of a deployment's configuration"
+    );
+    assert_eq!(
+        match value {
+            DebugValue::Gauge(count) => count.into_inner(),
+            other => panic!("expected a gauge, got {other:?}"),
+        },
+        1.0
+    );
+
+    // AND A HEALTHY WATCH SET PUBLISHES THE ZERO.
+    let healthy = Inputs::of(SERVICE, &[&listener]);
+    let recorder = DebuggingRecorder::new();
+    let snapshotter: Snapshotter = recorder.snapshotter();
+    let named = metrics::with_local_recorder(&recorder, || healthy.export_unreadable());
+    assert!(named.is_empty());
+
+    let emitted = snapshotter.snapshot().into_vec();
+    assert_eq!(
+        emitted.len(),
+        1,
+        "the series must exist while everything is fine"
+    );
+    assert_eq!(
+        match &emitted[0].3 {
+            DebugValue::Gauge(count) => count.into_inner(),
+            other => panic!("expected a gauge, got {other:?}"),
+        },
+        0.0
     );
 }
 
