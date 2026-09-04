@@ -50,6 +50,24 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 /// spelling.
 pub const CERTIFICATE_NOT_AFTER: &str = "yadgar_tls_certificate_not_after_seconds";
 
+/// How many of the watched files cannot be read.
+///
+/// **THIS IS THE INSTRUMENT THAT MAKES THE WATCHER'S OWN FAILURE VISIBLE.** A
+/// file the watcher cannot read is one whose rotation it will never report, and
+/// every other signal this crate emits stays perfectly healthy while that is
+/// true — the log line scrolls away, the expiry gauge keeps describing the leaf
+/// that WAS loaded, and the process serves on. A pod is expected to sit at zero
+/// forever, so any other value is a condition rather than noise.
+///
+/// A COUNT, never one series per path. The paths are named in the log line
+/// beside it; putting them in a label would make the cardinality of this metric
+/// a property of a deployment's configuration, which D67 refuses.
+///
+/// The same naming rule applies as to [`CERTIFICATE_NOT_AFTER`]: renaming it
+/// blanks a panel rather than failing anything, so it is a constant and a test
+/// asserts its spelling.
+pub const WATCHED_FILES_UNREADABLE: &str = "yadgar_rotation_watched_files_unreadable";
+
 /// How often the watched files are re-hashed.
 const POLL_KEY: &str = "TLS_ROTATION_POLL_SECS";
 
@@ -395,27 +413,82 @@ impl Inputs {
         self.files.iter().map(|f| f.path.as_path()).collect()
     }
 
-    /// The digests taken at boot, or `None` if any file could not be read.
-    fn baseline(&self) -> Option<Vec<[u8; 32]>> {
-        self.files.iter().map(|f| f.loaded).collect()
+    /// The watched files this process could NOT read at boot.
+    ///
+    /// Each is a path a DEPLOYMENT named and the process then failed to read.
+    /// They stay in the watch set: dropping them would make the set quietly
+    /// smaller than the configuration that produced it, which is the class of
+    /// defect [`Inputs::of`] exists to close.
+    pub fn unread_at_boot(&self) -> Vec<&Path> {
+        self.files
+            .iter()
+            .filter(|f| f.loaded.is_none())
+            .map(|f| f.path.as_path())
+            .collect()
     }
 
-    /// The digests now on disk, or `None` if any file could not be read — which
-    /// is a TRANSIENT state during a kubelet rewrite, not a rotation.
-    fn on_disk(&self) -> Option<Vec<[u8; 32]>> {
+    /// The digest each watched file holds NOW, `None` where it cannot be read.
+    ///
+    /// **ONE ENTRY PER FILE, NEVER ONE ANSWER FOR THE SET.** This used to
+    /// `collect()` into an `Option<Vec<_>>`, so a single unreadable file
+    /// answered `None` for all of them and every poll fell into the transient
+    /// arm — six files rotating perfectly well went unnoticed for as long as one
+    /// stayed gone.
+    fn on_disk(&self) -> Vec<Option<[u8; 32]>> {
         self.files
             .iter()
             .map(|f| std::fs::read(&f.path).ok().as_deref().map(digest_of))
             .collect()
     }
 
-    fn differing(&self, current: &[[u8; 32]]) -> Vec<String> {
+    /// The watched files whose contents are not what this process loaded.
+    ///
+    /// **A FILE THAT CANNOT BE READ RIGHT NOW IS NOT ONE OF THEM.** That is the
+    /// transient state kubelet passes through while it rewrites a mount, and
+    /// acting on it would exit the process over a directory that is about to be
+    /// fine — a watcher whose failure is worse than not having one.
+    ///
+    /// The reverse direction IS a change, and always was this function's answer:
+    /// a file with no baseline that now reads is material the process never
+    /// loaded, so `None != Some(digest)` reports it. Only `baseline()`'s collapse
+    /// made that answer unreachable.
+    fn differing(&self, current: &[Option<[u8; 32]>]) -> Vec<String> {
         self.files
             .iter()
             .zip(current)
-            .filter(|(f, now)| f.loaded.as_ref() != Some(*now))
+            .filter(|(f, now)| now.is_some() && f.loaded != **now)
             .map(|(f, _)| f.path.display().to_string())
             .collect()
+    }
+
+    /// The watched files that cannot be read at this instant.
+    fn unreadable(&self, current: &[Option<[u8; 32]>]) -> Vec<String> {
+        self.files
+            .iter()
+            .zip(current)
+            .filter(|(_, now)| now.is_none())
+            .map(|(f, _)| f.path.display().to_string())
+            .collect()
+    }
+
+    fn publish_unreadable(&self, count: usize) {
+        metrics::gauge!(WATCHED_FILES_UNREADABLE, "service" => self.service).set(count as f64);
+    }
+
+    /// Publish [`WATCHED_FILES_UNREADABLE`] for the watched files that cannot be
+    /// read right now, and name them.
+    ///
+    /// **A ZERO HERE IS A MEASUREMENT, WHICH IS WHY THIS PUBLISHES
+    /// UNCONDITIONALLY** — and it is the opposite call from
+    /// [`Inputs::export_not_after`], deliberately. An expiry for a certificate
+    /// this process never loaded would be an invented number a dashboard cannot
+    /// tell from a real one. "None of the watched files is unreadable" is not
+    /// invented; it is the answer, and a series that appears only once something
+    /// is wrong cannot be told apart from an exporter that is not running.
+    pub fn export_unreadable(&self) -> Vec<String> {
+        let names = self.unreadable(&self.on_disk());
+        self.publish_unreadable(names.len());
+        names
     }
 
     fn loaded(&self, which: Presented) -> Option<&Leaf> {
@@ -507,24 +580,59 @@ pub async fn watch_with_seed(inputs: Inputs, schedule: Schedule, seed: u64) {
         tracing::debug!("no watched files; this process will not exit on a rotation");
         never().await
     }
-    let Some(booted) = inputs.baseline() else {
-        // A watcher that cannot take a baseline is one that would compare
-        // against nothing. Today's behaviour, never worse — see ADR-0523.
-        tracing::warn!("the watched files could not be read; rotation will not be noticed");
-        never().await
-    };
+    // A FILE THE DEPLOYMENT NAMED AND THIS PROCESS COULD NOT READ IS A
+    // CONFIGURATION DEFECT, and `error!` rather than `warn!` says so. It is a
+    // different fact from the loop's transient warning below: that one is a
+    // mount being rewritten, this one is a path that was already wrong when the
+    // process started. The watcher carries on over every OTHER file, because one
+    // bad path silently retiring six good ones is the failure this replaced.
+    let unread = inputs.unread_at_boot();
+    if !unread.is_empty() {
+        tracing::error!(
+            unreadable = unread
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            watched = inputs.watched().len(),
+            "watched files could NOT be read at boot. Their rotation cannot be noticed until \
+             they become readable, at which point this process exits to be restarted onto \
+             them; every other watched file is still being watched. Exported as \
+             {WATCHED_FILES_UNREADABLE}"
+        );
+    }
+
     let serving_before = inputs.reported(Presented::Serving, false);
     let client_before = inputs.reported(Presented::Client, false);
+    let mut reported_unreadable: Vec<String> = Vec::new();
 
     loop {
         tokio::time::sleep(schedule.poll).await;
-        let Some(current) = inputs.on_disk() else {
-            // TRANSIENT, not a rotation: kubelet is halfway through rewriting
-            // the mount. Acting on it exits the process for nothing.
-            tracing::warn!("a watched file could not be read; keeping what was already loaded");
-            continue;
-        };
-        if current == booted {
+        let current = inputs.on_disk();
+
+        // THE GAUGE IS WRITTEN EVERY POLL, the log line only when the set moves.
+        // A standing condition belongs in a gauge; a transition belongs in a
+        // log. Warning on every poll would put a line a minute in the journal
+        // for the life of the pod and train a reader to skip it.
+        let unreadable = inputs.unreadable(&current);
+        inputs.publish_unreadable(unreadable.len());
+        if unreadable != reported_unreadable {
+            if !unreadable.is_empty() {
+                // TRANSIENT, not a rotation: kubelet is halfway through
+                // rewriting the mount. Acting on it exits the process for
+                // nothing, so what was already loaded is kept — for these files
+                // ALONE, which is the whole of the change here.
+                tracing::warn!(
+                    unreadable = unreadable.join(", "),
+                    "watched files could not be read; keeping what was already loaded for them, \
+                     and still watching the rest"
+                );
+            }
+            reported_unreadable = unreadable;
+        }
+
+        let changed = inputs.differing(&current);
+        if changed.is_empty() {
             continue;
         }
 
@@ -534,7 +642,7 @@ pub async fn watch_with_seed(inputs: Inputs, schedule: Schedule, seed: u64) {
             serving_after = inputs.reported(Presented::Serving, true),
             client_before,
             client_after = inputs.reported(Presented::Client, true),
-            changed = inputs.differing(&current).join(", "),
+            changed = changed.join(", "),
             splay_secs = waited.as_secs(),
             "the files read at boot have CHANGED on disk. A running listener's certificate \
              cannot be swapped in place, so this process drains and exits 0 to be restarted \
@@ -640,15 +748,56 @@ mod tests {
             .is_empty());
     }
 
+    /// An unreadable file has no baseline OF ITS OWN, and that is now the whole
+    /// of what it means. It used to mean the SET had none.
     #[test]
     fn an_unreadable_input_has_no_baseline() {
-        let inputs = Inputs::new("test").also(Path::new("/etc/yadgar/quokka-4d81/absent.pem"));
-        assert_eq!(inputs.baseline(), None);
-        assert_eq!(inputs.on_disk(), None);
+        let path = Path::new("/etc/yadgar/quokka-4d81/absent.pem");
+        let inputs = Inputs::new("test").also(path);
+        assert_eq!(inputs.unread_at_boot(), vec![path]);
+        assert_eq!(inputs.on_disk(), vec![None]);
         assert_eq!(inputs.fingerprint(Presented::Serving), None);
         assert_eq!(inputs.not_after(Presented::Serving), None);
         assert_eq!(inputs.fingerprint(Presented::Client), None);
         assert_eq!(inputs.not_after(Presented::Client), None);
+    }
+
+    /// **ONE UNREADABLE FILE LEAVES EVERY OTHER FILE'S BASELINE INTACT.** The
+    /// collapse this replaced turned the first `None` into a `None` for the set,
+    /// which is what disabled the watcher.
+    #[test]
+    fn an_unreadable_input_does_not_erase_the_baselines_beside_it() {
+        let absent = Path::new("/etc/yadgar/quokka-4d81/absent.pem");
+        let readable = Path::new("/proc/self/cmdline");
+        let inputs = Inputs::new("test").also(absent).also(readable);
+
+        assert_eq!(inputs.unread_at_boot(), vec![absent]);
+        let on_disk = inputs.on_disk();
+        assert_eq!(on_disk.len(), 2);
+        assert_eq!(on_disk[0], None, "the unreadable one, and only it");
+        assert!(on_disk[1].is_some(), "the readable one still answers");
+
+        // AND THE UNREADABLE ONE IS NOT REPORTED AS A CHANGE. `None` on both
+        // sides is "still unreadable", never "rotated".
+        assert!(inputs.differing(&on_disk).is_empty());
+        assert_eq!(
+            inputs.unreadable(&on_disk),
+            vec![absent.display().to_string()]
+        );
+    }
+
+    /// The direction that IS a change: no baseline, and bytes on disk now.
+    #[test]
+    fn a_file_with_no_baseline_that_now_reads_is_a_change() {
+        let absent = Path::new("/etc/yadgar/quokka-4d81/absent.pem");
+        let inputs = Inputs::new("test").also(absent);
+        let appeared = vec![Some(digest_of(b"material this process never loaded"))];
+
+        assert_eq!(
+            inputs.differing(&appeared),
+            vec![absent.display().to_string()]
+        );
+        assert!(inputs.unreadable(&appeared).is_empty());
     }
 
     #[test]
