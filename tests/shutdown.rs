@@ -72,11 +72,13 @@ async fn a_sigterm_drains_the_server_instead_of_killing_the_process() {
         .expect("a free loopback port");
     let port = listener.local_addr().unwrap().port();
 
-    // BEFORE the server is spawned, and that ordering is the property under test
-    // as much as the signal itself is. `shutdown` installs both handlers when it
-    // is CALLED; an `async fn` would install them on first poll instead, and a
-    // SIGTERM arriving in that window would kill this process rather than drain
-    // it. The `kill` below lands in exactly that window.
+    // **THE `kill` BELOW DOES NOT LAND IN THE ARMING WINDOW, and this comment
+    // used to claim it did.** `accepts(port)` cannot return until the spawned
+    // task has been polled, and polling it polls `signals` — so by the time the
+    // signal is raised the handlers are installed whether `shutdown` registers
+    // eagerly or on first poll. A mutant that registers lazily passes this file.
+    // `tests/arming.rs` is where that window is held open and measured; what is
+    // under test HERE is the drain itself.
     let signals = shutdown().expect("the signal handlers install");
 
     let serving = tokio::spawn(async move {

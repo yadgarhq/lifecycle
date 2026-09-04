@@ -6,26 +6,77 @@ rust-version = "1.90"
 license = "Apache-2.0"
 description = "How a server process starts, stops and restarts: ADR-0523's exit-on-change rotation watcher, the SIGTERM drain, and the budget that bounds it."
 
+# ONE GATE, AND IT IS DRAWN WHERE THE COST IS.
+#
+# `rotate` is DEFAULT-ON, so every consumer that already pins this crate builds
+# exactly what it built before and no manifest has to move to keep working.
+# Turning it off is what a service opts into, and it drops the whole certificate
+# tree — `x509-parser` over `asn1-rs`, `der-parser`, `oid-registry`, `nom` and
+# the rest — plus `sha2`, `thiserror` and the `metrics` facade. MEASURED on the
+# normal dependency graph with `cargo tree -e normal`, not estimated: 54 crates
+# with the feature and 16 without it, so 38 go.
+#
+# `iam-db` and `task-db` call `shutdown` and nothing else, and paid for all 38.
+#
+# **THERE IS NO `drain` GATE, and that is a measurement rather than a taste.**
+# `drain.rs` reaches for `tokio` and `tracing` and nothing else, and `rotate`
+# needs both anyway — so gating it would drop ZERO crates while admitting a
+# `default-features = false` build of a crate with no public items in it. All
+# five consumers that pin this crate today use `shutdown`. A gate earns its
+# complexity by removing weight, and that one would remove none.
+[features]
+default = ["rotate"]
+rotate = [
+  "dep:metrics",
+  "dep:rustls-pki-types",
+  "dep:sha2",
+  "dep:thiserror",
+  "dep:x509-parser",
+]
+
 [dependencies]
 # NO TRANSPORT, DELIBERATELY. `drain_within` is generic over a
 # `tokio::task::JoinHandle`, so it bounds a tonic server, an axum server or a
 # bare accept loop without naming any of them. A lifecycle crate that pulled in
 # a gRPC stack would make every adopter pay for one.
+#
+# `tokio` and `tracing` are UNGATED because `drain` needs every one of these
+# features on its own: `signal` and `macros` for `shutdown`'s `select!`, `sync`
+# for the oneshot `drain_within` holds, `time` for the budget.
 tokio = { version = "1", features = ["macros", "rt", "signal", "sync", "time"] }
 tracing = "0.1"
-thiserror = "2"
-sha2 = "0.10"
+# EVERYTHING BELOW IS `rotate`-ONLY. Each is used in `src/rotate.rs` and nowhere
+# else, which is what makes one gate over the module the whole of the split.
+thiserror = { version = "2", optional = true }
+sha2 = { version = "0.10", optional = true }
 # PEM to DER and no further, which is all the watcher needs to fingerprint a
 # leaf. The same parser tonic and rustls use, so "the first certificate in this
 # file" means the same thing here as it does to the listener.
-rustls-pki-types = { version = "1", features = ["std"] }
+rustls-pki-types = { version = "1", features = ["std"], optional = true }
 # For `validity().not_after` ALONE. `rustls-pki-types` decodes PEM to DER and
 # stops there; nothing in the rustls tree will read an expiry out of the result.
-x509-parser = "0.18"
+x509-parser = { version = "0.18", optional = true }
 # The metrics FACADE only, for the same reason `yadgar-telemetry` states: a
 # library that installs an exporter decides the backend for every service that
 # links it. The binary installs one.
-metrics = "0.24"
+metrics = { version = "0.24", optional = true }
+
+# THE TWO ROTATION SUITES NAME THE FEATURE THEY NEED, because a test target
+# cannot be gated any other way: Cargo forbids an optional dev-dependency, so
+# `--no-default-features` would still compile `tests/rotation.rs` against a
+# module that is no longer there and fail on the `use`. `required-features`
+# makes Cargo skip the target instead.
+#
+# `tests/drain.rs`, `tests/shutdown.rs` and `tests/arming.rs` stay
+# auto-discovered — declaring some targets does not switch `autotests` off — and
+# they must, because what they cover is exactly what survives the gate.
+[[test]]
+name = "rotation"
+required-features = ["rotate"]
+
+[[test]]
+name = "assembly"
+required-features = ["rotate"]
 
 [dev-dependencies]
 # `test-util` for a paused clock, `net` for the drain rig's real listener.
