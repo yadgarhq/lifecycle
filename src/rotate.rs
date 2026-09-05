@@ -68,39 +68,282 @@ pub const CERTIFICATE_NOT_AFTER: &str = "yadgar_tls_certificate_not_after_second
 /// asserts its spelling.
 pub const WATCHED_FILES_UNREADABLE: &str = "yadgar_rotation_watched_files_unreadable";
 
+/// Where the configuration chart mounts what it renders.
+///
+/// **THIS IS AN ADDRESS, NOT A KNOB.** ADR-0569 governs the VALUE of a setting
+/// and requires the refusal to name the file the value was looked for in — which
+/// presumes the process already knows that path. A setting that said where
+/// settings live would be an infinite regress, so this is a constant and a test
+/// asserts its exact spelling.
+///
+/// The safety property, stated because it is the one way this can be wrong: the
+/// chart's `mountPath` and this constant must agree. They disagree loudly rather
+/// than quietly — a mismatch produces [`ScheduleError::Absent`], which names the
+/// path this process looked in.
+pub const CONFIG_DIR: &str = "/etc/yadgar/config";
+
+/// The shared document, under [`CONFIG_DIR`].
+///
+/// The directory repeats the file name because the mount repeats it: ConfigMap
+/// `shared` carries one key, `shared.yaml`, and is mounted at its own directory
+/// so that one ConfigMap's rotation cannot disturb another's. The redundancy buys
+/// something real — the path in a refusal is the same file name an operator edits
+/// in `yadgarhq/config`, so the message points at the fix rather than at a mount.
+pub const SHARED_DOCUMENT: &str = "shared/shared.yaml";
+
 /// How often the watched files are re-hashed.
-const POLL_KEY: &str = "TLS_ROTATION_POLL_SECS";
+///
+/// The KNOB constants are the whole path, because that is what a refusal has to
+/// name for an operator to find the line: `shared.yaml` holds several sections
+/// and `pollSeconds` alone would not say which one. The LEAF constants are what
+/// the lookup uses, and they are derived from the same literal so the message
+/// and the lookup cannot drift apart.
+const POLL_LEAF: &str = "pollSeconds";
+const SPLAY_MAX_LEAF: &str = "splayMaxSeconds";
+const POLL_KNOB: &str = "tlsRotation.pollSeconds";
 
 /// The top of the range this pod's splay is drawn from.
-const SPLAY_MAX_KEY: &str = "TLS_ROTATION_SPLAY_MAX_SECS";
+const SPLAY_MAX_KNOB: &str = "tlsRotation.splayMaxSeconds";
 
-const DEFAULT_POLL: Duration = Duration::from_secs(60);
-
-const DEFAULT_SPLAY_MAX: Duration = Duration::from_secs(300);
-
-/// A schedule a deployment stated and this process cannot use.
+/// A schedule a deployment stated and this process cannot use, or did not state
+/// at all.
+///
+/// **EVERY VARIANT REFUSES THE BOOT AND NAMES A FILE.** ADR-0569: a knob is read
+/// from the configuration repository and from nowhere else, with no compiled-in
+/// default, no system-level fallback and no last-resort constant. There used to
+/// be two of those constants here — 60 seconds and 300 seconds — and an
+/// installation that never set the knob ran them without anything saying so.
 #[derive(Debug, thiserror::Error)]
 pub enum ScheduleError {
     #[error(
-        "{key} is {value:?}, which is not a whole number of seconds ({source}). It is refused \
-         rather than replaced with the default, because a deployment that believes it set this \
-         and did not would run an interval nobody chose and see nothing wrong."
+        "{path} does not exist, so no configuration was read. It is the shared document of the \
+         configuration chart in yadgarhq/config, mounted from the ConfigMap `shared`. There is no \
+         default to fall back to (ADR-0569): every knob has one source and this is it. If the pod \
+         reached this point at all the volume mounted, so the likely fault is a mountPath that \
+         disagrees with the chart rather than a missing ConfigMap — a missing ConfigMap keeps the \
+         pod in ContainerCreating instead."
+    )]
+    Absent { path: String },
+
+    #[error(
+        "{path} exists and cannot be read ({source}). The likeliest cause is a chart whose \
+         `mountPath` names the FILE rather than the directory holding it: kubelet then creates a \
+         DIRECTORY at this path and the read fails as `Is a directory`. Mount the ConfigMap at \
+         /etc/yadgar/config/<name> and let the key become the file inside it."
+    )]
+    Unreadable {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error(
+        "{path} does not have the shape this reader expects ({source}). Either the file is not \
+         parseable YAML at all, or a part of it is the wrong KIND: the document must be a mapping, \
+         and `tlsRotation` within it must be a mapping of knobs rather than a scalar or a list. \
+         The error in brackets names the part that did not fit. Note that a wrong-KIND file is \
+         still valid YAML, so a YAML linter will call it clean."
+    )]
+    Malformed {
+        path: String,
+        #[source]
+        source: serde_norway::Error,
+    },
+
+    #[error(
+        "{knob} is not defined in {path}. That file is the only place it is read from — there is \
+         no compiled-in default and no fallback (ADR-0569) — so this process refuses to start \
+         rather than run a value nobody chose. Add the line to the document, or restore it from \
+         the template in yadgarhq/config."
+    )]
+    Missing { knob: &'static str, path: String },
+
+    #[error(
+        "{knob} is present in {path} and has no value. That is a DIFFERENT fault from the knob \
+         being missing and is reported separately on purpose: an empty setting is usually a \
+         half-finished edit, and collapsing the two cases into one is how a deployment ends up \
+         believing it configured something it did not."
+    )]
+    Empty { knob: &'static str, path: String },
+
+    #[error(
+        "{knob} in {path} is {value:?}, which is not a whole number of seconds ({source}). It is \
+         refused rather than replaced with a default, because a deployment that believes it set \
+         this and did not would run an interval nobody chose and see nothing wrong."
     )]
     Unparsable {
-        key: &'static str,
+        knob: &'static str,
+        path: String,
         value: String,
         #[source]
         source: std::num::ParseIntError,
     },
 
     #[error(
-        "{POLL_KEY} is 0, which is not a poll interval. Sleeping for no time at all turns the \
-         rotation watcher into a loop that re-reads and re-hashes the watched files as fast as a \
-         core allows, for the life of the pod. Set it to at least 1. Nothing is turned OFF by \
-         setting it to 0 — an empty watch set is what leaves the watcher idle. {SPLAY_MAX_KEY} is \
-         different: 0 there means exit at once, which is a supported choice."
+        "{POLL_KNOB} in {path} is 0, which is not a poll interval. Sleeping for no time at all \
+         turns the rotation watcher into a loop that re-reads and re-hashes the watched files as \
+         fast as a core allows, for the life of the pod. Set it to at least 1. Nothing is turned \
+         OFF by setting it to 0 — an empty watch set is what leaves the watcher idle. \
+         {SPLAY_MAX_KNOB} is different: 0 there means exit at once, which is a supported choice."
     )]
-    ZeroPoll,
+    ZeroPoll { path: String },
+}
+
+/// The configuration document this process reads its knobs out of.
+///
+/// **A `Material` LIKE ANY OTHER, and that is the whole reload story.** ADR-0523
+/// watches every file the process read at boot, so handing this to [`Inputs::of`]
+/// alongside the TLS configuration puts the document in the watch set by the
+/// existing rule: an operator edits `shared.yaml` in `yadgarhq/config`, Argo syncs
+/// the ConfigMap, kubelet swaps the mounted file, the watcher sees a changed
+/// digest, and the pod drains and restarts onto the new value. No new mechanism,
+/// and no code beyond one more entry in the list a service already builds
+/// (ADR-0570).
+///
+/// **A DIRECTORY MOUNT IS LOAD-BEARING.** A `subPath` mount is copied once at
+/// container start and kubelet never updates it, so a chart that used one would
+/// leave this file frozen for the life of the pod while the ConfigMap moved
+/// underneath it — the watcher would see nothing and report nothing. The charts
+/// mount the Secrets they read as directories for exactly this reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Configuration {
+    path: PathBuf,
+}
+
+impl Configuration {
+    /// The document where the chart mounts it.
+    pub fn mounted() -> Self {
+        Self::under(CONFIG_DIR)
+    }
+
+    /// The same, under any root — which is what makes it testable without a
+    /// cluster, and the seam that replaced `Schedule::from_lookup`.
+    pub fn under(root: impl AsRef<Path>) -> Self {
+        Self {
+            path: root.as_ref().join(SHARED_DOCUMENT),
+        }
+    }
+
+    /// The file the knobs are read from. This is what a refusal names.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Read the rotation schedule out of the document.
+    ///
+    /// # Errors
+    ///
+    /// Every way this file can fail to state a schedule: absent, unreadable,
+    /// unparsable as YAML, missing the knob, holding it empty, holding something
+    /// that is not a whole number of seconds, or asking for a zero poll interval.
+    /// See [`ScheduleError`] — none of them has a fallback.
+    pub fn schedule(&self) -> Result<Schedule, ScheduleError> {
+        let where_ = || self.path.display().to_string();
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ScheduleError::Absent { path: where_() })
+            }
+            Err(source) => {
+                return Err(ScheduleError::Unreadable {
+                    path: where_(),
+                    source,
+                })
+            }
+        };
+
+        // `Option<Document>` rather than `Document`, because a file holding
+        // nothing but comments is a YAML document whose value is null, and
+        // deserialising null into a struct is an error that would be reported as
+        // a malformed file. It is not malformed; it defines no knob, which is the
+        // `Missing` case below and a much more useful thing to be told.
+        let document: Option<Document> =
+            serde_norway::from_str(&text).map_err(|source| ScheduleError::Malformed {
+                path: where_(),
+                source,
+            })?;
+        let section = document.and_then(|d| d.tls_rotation).unwrap_or_default();
+        let poll = section.get(POLL_LEAF).cloned();
+        let splay = section.get(SPLAY_MAX_LEAF).cloned();
+
+        let poll = self.seconds(POLL_KNOB, poll)?;
+        if poll.is_zero() {
+            return Err(ScheduleError::ZeroPoll { path: where_() });
+        }
+        Ok(Schedule::new(poll, self.seconds(SPLAY_MAX_KNOB, splay)?))
+    }
+
+    /// One knob, and the four distinct ways it can fail to be a number.
+    ///
+    /// **ABSENT AND EMPTY ARE DIFFERENT CASES.** A `serde` field typed
+    /// `Option<u64>` collapses them — `pollSeconds:` with nothing after it
+    /// deserialises to `None` exactly as a missing key does — so the field is a
+    /// `Value` and the distinction is drawn here.
+    fn seconds(
+        &self,
+        knob: &'static str,
+        value: Option<serde_norway::Value>,
+    ) -> Result<Duration, ScheduleError> {
+        let path = || self.path.display().to_string();
+        let raw = match value {
+            None => return Err(ScheduleError::Missing { knob, path: path() }),
+            Some(serde_norway::Value::Null) => {
+                return Err(ScheduleError::Empty { knob, path: path() })
+            }
+            // A NUMBER IS THE SHAPE THE TEMPLATE SHIPS, and a quoted one is
+            // accepted beside it: `pollSeconds: "60"` is an operator writing the
+            // right value in a slightly different way, and refusing it would
+            // teach nothing. Everything else — a float, a list, a map, a word —
+            // reaches `parse` and is refused by name.
+            Some(other) => match other.as_u64() {
+                Some(n) => return Ok(Duration::from_secs(n)),
+                None => other
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| serde_norway::to_string(&other).unwrap_or_default()),
+            },
+        };
+        if raw.trim().is_empty() {
+            return Err(ScheduleError::Empty { knob, path: path() });
+        }
+        raw.trim()
+            .parse()
+            .map(Duration::from_secs)
+            .map_err(|source| ScheduleError::Unparsable {
+                knob,
+                path: path(),
+                value: raw,
+                source,
+            })
+    }
+}
+
+impl Material for Configuration {
+    fn files(&self) -> Vec<File<'_>> {
+        vec![File::read(&self.path)]
+    }
+}
+
+/// The document, carrying ONLY what this crate reads.
+///
+/// **`deny_unknown_fields` IS DELIBERATELY ABSENT.** `shared.yaml` holds knobs
+/// owned by other code and will hold more; a parser that refused a key it had
+/// not been told about would make adding somebody else's setting break the
+/// rotation watcher in every service at once.
+///
+/// **THE SECTION IS A `Mapping` AND NOT A STRUCT, and that is the fix for the
+/// collapse this file is about.** A field typed `Option<T>` cannot tell a key
+/// that is absent from a key written with no value after it: serde deserialises
+/// an explicit YAML `null` into `None`, exactly as it does a key that is not
+/// there. That was MEASURED here rather than assumed — the first implementation
+/// used `Option<serde_norway::Value>` on the belief that a `Value` would preserve
+/// the difference, and the test asserting the two faults differ FAILED, reporting
+/// `pollSeconds:` as a missing knob. Looking the key up in a map asks the
+/// question the struct cannot: is it there, and if so what is in it.
+#[derive(serde::Deserialize)]
+struct Document {
+    #[serde(rename = "tlsRotation")]
+    tls_rotation: Option<serde_norway::Mapping>,
 }
 
 /// How often to look, and how long this pod waits before acting on what it saw.
@@ -110,52 +353,9 @@ pub struct Schedule {
     splay_max: Duration,
 }
 
-impl Default for Schedule {
-    fn default() -> Self {
-        Self::new(DEFAULT_POLL, DEFAULT_SPLAY_MAX)
-    }
-}
-
 impl Schedule {
     pub fn new(poll: Duration, splay_max: Duration) -> Self {
         Self { poll, splay_max }
-    }
-
-    /// Read the schedule from the environment.
-    ///
-    /// # Errors
-    ///
-    /// If either variable is set to something that is not a whole number of
-    /// seconds, or the poll interval is zero. See [`ScheduleError`].
-    pub fn from_env() -> Result<Self, ScheduleError> {
-        Self::from_lookup(|key| std::env::var(key).ok())
-    }
-
-    /// The same, against any lookup — which is what makes it testable without
-    /// mutating process-global state.
-    ///
-    /// # Errors
-    ///
-    /// As [`Schedule::from_env`].
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ScheduleError> {
-        let seconds = |key: &'static str, default: Duration| match lookup(key) {
-            None => Ok(default),
-            Some(raw) => raw
-                .trim()
-                .parse()
-                .map(Duration::from_secs)
-                .map_err(|source| ScheduleError::Unparsable {
-                    key,
-                    value: raw,
-                    source,
-                }),
-        };
-
-        let poll = seconds(POLL_KEY, DEFAULT_POLL)?;
-        if poll.is_zero() {
-            return Err(ScheduleError::ZeroPoll);
-        }
-        Ok(Self::new(poll, seconds(SPLAY_MAX_KEY, DEFAULT_SPLAY_MAX)?))
     }
 
     pub fn poll(&self) -> Duration {
@@ -839,73 +1039,244 @@ mod tests {
         }
     }
 
-    fn lookup<'a>(
-        pairs: &'a [(&'static str, &'static str)],
-    ) -> impl Fn(&str) -> Option<String> + 'a {
-        move |key| {
-            pairs
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.to_string())
-        }
+    /// A document at the path the mount produces, under a directory of this
+    /// test's own. Nothing here overwrites a file in place: each case builds its
+    /// own tree, so a stale file cannot make a broken implementation pass.
+    fn document(body: &str) -> (PathBuf, Configuration) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "yadgar-config-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("shared")).unwrap();
+        let path = root.join(SHARED_DOCUMENT);
+        std::fs::write(&path, body).unwrap();
+        (path, Configuration::under(&root))
+    }
+
+    /// The same tree with NO document in it — the case a fresh installation
+    /// reaches when the ConfigMap is mounted somewhere else.
+    fn no_document() -> Configuration {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "yadgar-config-absent-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        Configuration::under(&root)
     }
 
     #[test]
-    fn an_unconfigured_schedule_is_the_default_one() {
-        assert_eq!(
-            Schedule::from_lookup(lookup(&[])).unwrap(),
-            Schedule::default()
-        );
-        assert_eq!(Schedule::default().poll(), Duration::from_secs(60));
-        assert_eq!(Schedule::default().splay_max(), Duration::from_secs(300));
-    }
-
-    #[test]
-    fn both_values_arrive() {
-        let vars = [
-            ("TLS_ROTATION_POLL_SECS", "17"),
-            ("TLS_ROTATION_SPLAY_MAX_SECS", "941"),
-        ];
-        let schedule = Schedule::from_lookup(lookup(&vars)).unwrap();
+    fn the_stated_values_are_the_ones_used() {
+        // NOT "it starts". A test that only asserted success would pass against
+        // a surviving compiled-in default, which is the whole thing ADR-0569
+        // deletes. The numbers are deliberately nothing like 60 and 300.
+        let (_, config) = document("tlsRotation:\n  pollSeconds: 17\n  splayMaxSeconds: 941\n");
+        let schedule = config.schedule().unwrap();
         assert_eq!(schedule.poll(), Duration::from_secs(17));
         assert_eq!(schedule.splay_max(), Duration::from_secs(941));
     }
 
     #[test]
-    fn a_zero_poll_interval_is_refused() {
-        let vars = [("TLS_ROTATION_POLL_SECS", "0")];
+    fn an_absent_document_refuses_and_names_the_file() {
+        let config = no_document();
+        let error = config.schedule().unwrap_err();
+        assert!(
+            matches!(error, ScheduleError::Absent { .. }),
+            "an absent document must refuse, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("shared/shared.yaml"),
+            "the refusal must name the file: {error}"
+        );
+    }
+
+    #[test]
+    fn a_document_that_defines_nothing_refuses_naming_the_knob() {
+        // Comments only, which is what a half-emptied template looks like. It is
+        // a VALID YAML document whose value is null, so this must not be reported
+        // as a malformed file.
+        let (path, config) = document("# every knob deleted\n");
+        let error = config.schedule().unwrap_err();
+        assert!(
+            matches!(error, ScheduleError::Missing { knob, .. } if knob == POLL_KNOB),
+            "got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(message.contains(POLL_KNOB), "must name the knob: {message}");
+        assert!(
+            message.contains(&path.display().to_string()),
+            "must name the file: {message}"
+        );
+    }
+
+    #[test]
+    fn each_knob_is_named_when_it_is_the_missing_one() {
+        for (body, expected) in [
+            ("tlsRotation:\n  splayMaxSeconds: 300\n", POLL_KNOB),
+            ("tlsRotation:\n  pollSeconds: 60\n", SPLAY_MAX_KNOB),
+        ] {
+            let (_, config) = document(body);
+            let error = config.schedule().unwrap_err();
+            assert!(
+                matches!(error, ScheduleError::Missing { knob, .. } if knob == expected),
+                "{body:?} must refuse naming {expected}, got {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_knob_is_not_the_same_case_as_a_missing_one() {
+        // THE CASE A NAIVE IMPLEMENTATION GETS WRONG. `pollSeconds:` with nothing
+        // after it deserialises to the same `None` a missing key does when the
+        // field is typed `Option<u64>`, so the two collapse into one branch and a
+        // half-finished edit is reported as a deleted knob.
+        let (_, empty) = document("tlsRotation:\n  pollSeconds:\n  splayMaxSeconds: 300\n");
+        let (_, missing) = document("tlsRotation:\n  splayMaxSeconds: 300\n");
+        let empty = empty.schedule().unwrap_err();
+        let missing = missing.schedule().unwrap_err();
+        assert!(
+            matches!(empty, ScheduleError::Empty { knob, .. } if knob == POLL_KNOB),
+            "an empty knob must report as empty, got {empty:?}"
+        );
+        assert!(matches!(missing, ScheduleError::Missing { .. }));
+        assert_ne!(
+            empty.to_string(),
+            missing.to_string(),
+            "the two faults must not read identically"
+        );
+        // The quoted-empty form is the same fault written another way.
+        let (_, quoted) = document("tlsRotation:\n  pollSeconds: \"  \"\n  splayMaxSeconds: 1\n");
         assert!(matches!(
-            Schedule::from_lookup(lookup(&vars)),
-            Err(ScheduleError::ZeroPoll)
+            quoted.schedule().unwrap_err(),
+            ScheduleError::Empty { .. }
+        ));
+    }
+
+    #[test]
+    fn a_zero_poll_interval_is_refused() {
+        let (_, config) = document("tlsRotation:\n  pollSeconds: 0\n  splayMaxSeconds: 300\n");
+        assert!(matches!(
+            config.schedule(),
+            Err(ScheduleError::ZeroPoll { .. })
         ));
     }
 
     #[test]
     fn a_zero_splay_is_allowed() {
-        let vars = [("TLS_ROTATION_SPLAY_MAX_SECS", "0")];
-        let schedule = Schedule::from_lookup(lookup(&vars)).unwrap();
+        let (_, config) = document("tlsRotation:\n  pollSeconds: 60\n  splayMaxSeconds: 0\n");
+        let schedule = config.schedule().unwrap();
         assert_eq!(schedule.splay_max(), Duration::ZERO);
         assert_eq!(schedule.poll(), Duration::from_secs(60));
     }
 
     #[test]
-    fn a_value_that_cannot_be_parsed_is_refused() {
-        for (key, value) in [
-            ("TLS_ROTATION_POLL_SECS", ""),
-            ("TLS_ROTATION_POLL_SECS", "60s"),
-            ("TLS_ROTATION_POLL_SECS", "-1"),
-            ("TLS_ROTATION_SPLAY_MAX_SECS", "five minutes"),
-            ("TLS_ROTATION_SPLAY_MAX_SECS", "1.5"),
+    fn a_value_that_is_not_a_whole_number_of_seconds_is_refused() {
+        for (knob, value) in [
+            (POLL_KNOB, "60s"),
+            (POLL_KNOB, "-1"),
+            (POLL_KNOB, "1.5"),
+            (SPLAY_MAX_KNOB, "five minutes"),
+            (SPLAY_MAX_KNOB, "[1, 2]"),
         ] {
-            let vars = [(key, value)];
+            let body = if knob == POLL_KNOB {
+                format!("tlsRotation:\n  pollSeconds: {value}\n  splayMaxSeconds: 300\n")
+            } else {
+                format!("tlsRotation:\n  pollSeconds: 60\n  splayMaxSeconds: {value}\n")
+            };
+            let (_, config) = document(&body);
+            let error = config.schedule().unwrap_err();
             assert!(
-                matches!(
-                    Schedule::from_lookup(lookup(&vars)),
-                    Err(ScheduleError::Unparsable { key: named, .. }) if named == key
-                ),
-                "{key}={value:?} must be refused, naming the variable"
+                matches!(&error, ScheduleError::Unparsable { knob: named, .. } if *named == knob),
+                "{knob}={value:?} must be refused naming the knob, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_quoted_whole_number_is_the_same_value() {
+        let (_, config) =
+            document("tlsRotation:\n  pollSeconds: \"17\"\n  splayMaxSeconds: \"941\"\n");
+        let schedule = config.schedule().unwrap();
+        assert_eq!(schedule.poll(), Duration::from_secs(17));
+        assert_eq!(schedule.splay_max(), Duration::from_secs(941));
+    }
+
+    #[test]
+    fn a_knob_this_crate_does_not_read_is_ignored() {
+        // `audit.retentionDays` is in the same document and belongs to code that
+        // does not exist yet. A parser with `deny_unknown_fields` would make
+        // adding it break every service's rotation watcher at once.
+        let (_, config) = document(
+            "audit:\n  retentionDays: 90\ntlsRotation:\n  pollSeconds: 17\n  splayMaxSeconds: 941\n",
+        );
+        assert_eq!(config.schedule().unwrap().poll(), Duration::from_secs(17));
+    }
+
+    #[test]
+    fn a_file_that_is_not_yaml_is_refused_as_malformed() {
+        let (_, config) = document("tlsRotation:\n  pollSeconds: 60\n :\n\t- broken\n");
+        assert!(matches!(
+            config.schedule(),
+            Err(ScheduleError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_directory_where_the_document_should_be_is_refused_with_the_reason() {
+        // THE FAULT A CHART AUTHOR ACTUALLY PRODUCES. `mountPath` naming the file
+        // rather than the directory holding it makes kubelet create a DIRECTORY
+        // at this path, and the read then fails with `Is a directory` rather than
+        // `Not found` — so it lands in `Unreadable` and not in `Absent`. Without
+        // this test that variant carried the shortest message in the enum for the
+        // most reachable mistake in the mount.
+        let (path, config) = document("tlsRotation:\n  pollSeconds: 60\n  splayMaxSeconds: 1\n");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let error = config.schedule().unwrap_err();
+        assert!(
+            matches!(error, ScheduleError::Unreadable { .. }),
+            "a directory at the document's path must refuse, got {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&path.display().to_string()),
+            "must name the file: {message}"
+        );
+        assert!(
+            message.contains("mountPath"),
+            "must name the likely cause: {message}"
+        );
+    }
+
+    #[test]
+    fn the_mount_path_is_the_one_the_chart_writes() {
+        // A PATH IS AN INTERFACE TO A CHART, exactly as a metric name is an
+        // interface to a dashboard. Changing either of these strings without
+        // changing the chart produces a refusal at boot rather than a failure
+        // here, so the spelling is asserted.
+        assert_eq!(CONFIG_DIR, "/etc/yadgar/config");
+        assert_eq!(SHARED_DOCUMENT, "shared/shared.yaml");
+        assert_eq!(
+            Configuration::mounted().path(),
+            Path::new("/etc/yadgar/config/shared/shared.yaml")
+        );
+    }
+
+    #[test]
+    fn the_document_joins_the_watch_set() {
+        // ADR-0523 reloads by restart, and this is the whole of the wiring: the
+        // document is a `Material`, so a service that hands it to `Inputs::of`
+        // exits when an operator edits it. A `Material` impl that returned
+        // nothing would leave configuration changes silently ignored until
+        // something unrelated restarted the pod.
+        let (path, config) = document("tlsRotation:\n  pollSeconds: 60\n  splayMaxSeconds: 1\n");
+        let inputs = Inputs::of("test", &[&config]);
+        assert_eq!(inputs.watched(), vec![path.as_path()]);
     }
 
     #[test]

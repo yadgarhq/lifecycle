@@ -13,10 +13,20 @@ description = "How a server process starts, stops and restarts: ADR-0523's exit-
 # Turning it off is what a service opts into, and it drops the whole certificate
 # tree — `x509-parser` over `asn1-rs`, `der-parser`, `oid-registry`, `nom` and
 # the rest — plus `sha2`, `thiserror` and the `metrics` facade. MEASURED on the
-# normal dependency graph with `cargo tree -e normal`, not estimated: 54 crates
-# with the feature and 16 without it, so 38 go.
+# normal dependency graph with `cargo tree -e normal`, not estimated: 64 crates
+# with the feature and 16 without it, so 48 go.
 #
-# `iam-db` and `task-db` call `shutdown` and nothing else, and paid for all 38.
+# RE-MEASURED 2026-09-05, when the configuration reader landed and brought serde
+# and a YAML parser with it. It was 54/16/38 before that; leaving the old numbers
+# in place would have made a measurement into a claim, which is the shape this
+# repository keeps finding and deleting.
+#
+# NO CONSUMER TURNS IT OFF TODAY, and this sentence used to claim two did: it read
+# "`iam-db` and `task-db` call `shutdown` and nothing else, and paid for all 38".
+# That is false and was checked rather than reasoned about — both call
+# `rotate::Schedule::from_env`, and `x509-parser` is in both of their `Cargo.lock`
+# files. The gate is still worth its complexity for an adopter who wants only the
+# drain, but nothing in this estate is the example.
 #
 # **THERE IS NO `drain` GATE, and that is a measurement rather than a taste.**
 # `drain.rs` reaches for `tokio` and `tracing` and nothing else, and `rotate`
@@ -29,6 +39,8 @@ default = ["rotate"]
 rotate = [
   "dep:metrics",
   "dep:rustls-pki-types",
+  "dep:serde",
+  "dep:serde_norway",
   "dep:sha2",
   "dep:thiserror",
   "dep:x509-parser",
@@ -56,6 +68,22 @@ rustls-pki-types = { version = "1", features = ["std"], optional = true }
 # For `validity().not_after` ALONE. `rustls-pki-types` decodes PEM to DER and
 # stops there; nothing in the rustls tree will read an expiry out of the result.
 x509-parser = { version = "0.18", optional = true }
+# THE CONFIGURATION DOCUMENT, and the reason a YAML parser is here at all.
+# ADR-0570 delivers a knob as a ConfigMap mounted as a FILE, and ADR-0569 gives
+# that file exactly one source with no compiled-in default. So `Schedule` reads
+# `shared.yaml` out of the mount, and reading it needs a parser.
+#
+# `serde_norway` RATHER THAN `serde_yaml`, which is the obvious choice and is
+# unmaintained — RUSTSEC-2024-0370 — and `deny.toml` in this repository turns an
+# advisory into a failing gate. `serde_norway` is the maintained fork of the same
+# code, so the API is the one every Rust developer already knows.
+#
+# TYPED AND PARTIAL, never a free-form map. The struct below names only the knobs
+# THIS crate reads and deliberately does NOT set `deny_unknown_fields`: the
+# document is shared with knobs owned by other code, and a parser that refused an
+# unknown key would make adding anybody else's setting break this one.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_norway = { version = "0.9", optional = true }
 # The metrics FACADE only, for the same reason `yadgar-telemetry` states: a
 # library that installs an exporter decides the backend for every service that
 # links it. The binary installs one.

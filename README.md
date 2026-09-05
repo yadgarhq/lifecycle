@@ -131,15 +131,45 @@ Five repositories pin it: `iam`, `task`, `gateway`, `iam-db` and `task-db`. Each
 
 **`v0.1.0` — the tag in the block above — PREDATES the feature, and `default-features = false` against it is silently a no-op rather than an error.** A service turning the watcher off must first move its pin to the tag this change cuts, because a published tag never moves (ADR-0526). Cargo will not warn about the mismatch; the build simply keeps everything.
 
-**Measured with `cargo tree -e normal`, not estimated: 54 crates with the feature and 16 without it.** The 38 that go are `x509-parser` over `asn1-rs`, `der-parser`, `oid-registry`, `nom` and their tree, plus `sha2`, `thiserror` and the `metrics` facade. `iam-db` and `task-db` call `shutdown` and nothing else, and paid for all 38.
+**Measured with `cargo tree -e normal`, not estimated: 64 crates with the feature and 16 without it.** The 48 that go are `x509-parser` over `asn1-rs`, `der-parser`, `oid-registry`, `nom` and their tree, plus `sha2`, `thiserror`, the `metrics` facade, and — since the configuration reader landed — `serde` and `serde_norway` over `unsafe-libyaml-norway`, `indexmap`, `ryu` and `itoa`. The numbers were 54/16/38 before that reader existed and are re-measured rather than carried forward.
 
 There is no `drain` feature, and that is a measurement rather than a taste: `src/drain.rs` reaches for `tokio` and `tracing` alone, both of which `rotate` needs anyway, so gating it would drop **zero** crates while admitting a build of this crate with no public items in it.
+
+## Where the schedule comes from
+
+Two knobs govern the watcher, and as of this change they have exactly one source:
+
+| knob                          | what it sets                                                      |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `tlsRotation.pollSeconds`     | how often the watched files are re-hashed                         |
+| `tlsRotation.splayMaxSeconds` | the top of the range this pod's wait before exiting is drawn from |
+
+Both are read from **`/etc/yadgar/config/shared/shared.yaml`**, which is ConfigMap `shared`, rendered by the chart in [`yadgarhq/config`](https://github.com/yadgarhq/config) and mounted as a directory. `Configuration::mounted().schedule()` is the whole of reading them.
+
+**There is no default, no fallback and no last-resort constant (ADR-0569).** A knob the document does not define makes this process refuse to start, naming the knob and the file. That is a deliberate reversal: `DEFAULT_POLL = 60s` and `DEFAULT_SPLAY_MAX = 300s` used to sit in `src/rotate.rs`, and an installation that never set the values ran them with nothing saying so.
+
+Six ways it refuses, and they are separate variants because they are separate mistakes:
+
+| what is wrong                              | variant      |
+| ------------------------------------------ | ------------ |
+| the document is not there                  | `Absent`     |
+| it is there and cannot be read             | `Unreadable` |
+| it is not a YAML document                  | `Malformed`  |
+| the knob is not in it                      | `Missing`    |
+| the knob is there with no value            | `Empty`      |
+| the value is not a whole number of seconds | `Unparsable` |
+
+`Missing` and `Empty` are the pair worth the extra variant. A field typed `Option<u64>` cannot tell them apart — serde deserialises an explicit YAML `null` into `None` exactly as it does an absent key — so the section is read as a `Mapping` and the key is looked up rather than deserialised. That was measured here, not assumed: the first attempt used `Option<Value>` on the belief a `Value` would keep the difference, and the test asserting the two faults differ failed.
+
+**The document is a `Material`, so configuration reloads by restart with no new mechanism.** Hand it to `Inputs::of` beside the TLS configuration and ADR-0523's watcher covers it by its own rule — every file the process read at boot. An operator edits `shared.yaml`, Argo syncs the ConfigMap, kubelet swaps the mounted file, the digest changes, and the pod drains and exits onto the new value (ADR-0570). This is why the chart mounts a **directory** and never a `subPath`: a `subPath` mount is copied once at container start and kubelet never updates it, so the file would be frozen for the life of the pod and the watcher would see nothing.
+
+`CONFIG_DIR` is a compiled-in constant and that is not a violation of the rule above. ADR-0569 governs the VALUE of a setting; this is the ADDRESS of the settings, and a setting that said where settings live is an infinite regress — the ADR's own requirement that a refusal name the file presumes the process knows the path already. The one way it can be wrong is a chart whose `mountPath` disagrees with it, and that fails loudly: `Absent`, naming the path this process looked in.
 
 ## Layout
 
 ```
 src/lib.rs          crate docs and the re-exports
-src/rotate.rs       Schedule, Material, File, Inputs, watch  (feature `rotate`)
+src/rotate.rs       Configuration, Schedule, Material, File, Inputs, watch  (feature `rotate`)
 src/drain.rs        DRAIN_BUDGET, Drain, drain_within, shutdown
 tests/common/       the kubelet-shaped mount, and stand-ins for a service's config types
 tests/rotation.rs   the watcher against real atomic ..data swaps
