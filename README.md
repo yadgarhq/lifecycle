@@ -22,6 +22,13 @@ Not de-duplication. Measured on 2026-09-04, before this crate:
 | `shutdown`                      | 5 — the three above, plus `iam-db` and `task-db` |
 | `DRAIN_BUDGET` + `drain_within` | 3 — `iam`, `task`, `gateway`                     |
 
+**Measured 2026-09-06, present tense, against `origin/main` in all six module
+repositories: `DRAIN_BUDGET` and `drain_within` are now imported and called by
+all SIX module binaries** — `gateway`, `iam`, `task`, `iam-db`, `task-db` and
+`project-db` — not the three above. That growth happened after this crate
+existed and is a fact about today's estate, not a correction to the
+measurement the table records.
+
 ADR-0523 asked for it in its own consequences: _"the watcher core is repo-agnostic and is about to exist in four copies; lift it into a shared crate before the third."_ But de-duplication is the smaller half.
 
 **The bigger half is that the watch set was assembled in `main.rs`, where no test can reach it.** Every service built its `Inputs` as a run of builder calls interleaved with boot:
@@ -119,7 +126,7 @@ Per ADR-0526, an in-org crate is pinned by a published tag, never a bare revisio
 yadgar-lifecycle = { git = "https://github.com/yadgarhq/lifecycle", tag = "v0.1.0" }
 ```
 
-Five repositories pin it: `iam`, `task`, `gateway`, `iam-db` and `task-db`. Each adoption is a separate, reviewed change.
+Six repositories pin it: `iam`, `task`, `gateway`, `iam-db`, `task-db` and `project-db`. Each adoption is a separate, reviewed change.
 
 ### Features
 

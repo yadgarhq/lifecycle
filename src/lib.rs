@@ -42,6 +42,13 @@
 //! | `shutdown` | 5 — the three above, plus `iam-db` and `task-db` |
 //! | `DRAIN_BUDGET` + `drain_within` | 3 — `iam`, `task`, `gateway` |
 //!
+//! **Measured 2026-09-06, present tense, against `origin/main` in all six
+//! module repositories: `DRAIN_BUDGET` and `drain_within` are now imported and
+//! called by all SIX module binaries** — `gateway`, `iam`, `task`, `iam-db`,
+//! `task-db` and `project-db` — not the three above. That growth happened
+//! after this crate existed and is a fact about today's estate, not a
+//! correction to the measurement the table records.
+//!
 //! The watcher's three copies were identical apart from a service name, one
 //! type's spelling, and which of the per-role builders each service called.
 //! `shutdown`'s five were byte-identical in four repos and a near-copy with a

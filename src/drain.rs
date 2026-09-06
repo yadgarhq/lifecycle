@@ -60,8 +60,9 @@ use std::time::Duration;
 /// nothing there. **The rule is `terminationGracePeriodSeconds >= DRAIN_BUDGET +
 /// 5s`, plus any `preStop` sleep**, and the five seconds are what this process
 /// needs to log the outcome and exit after the budget expires. At a 25s budget
-/// that is 30s, which is also what Kubernetes defaults to — so today the estate
-/// satisfies the rule by inheritance rather than by writing it down.
+/// that is 30s, which is also what Kubernetes defaults to — so a deployment
+/// that sets nothing satisfies the rule by inheritance. Six module charts now
+/// write 35s down explicitly (ledger 690), which still clears that floor.
 ///
 /// **A deployment that lowers the grace period below 30s must lower this with
 /// it**, which is the one thing a reader has to carry away from this paragraph.
@@ -70,10 +71,19 @@ use std::time::Duration;
 /// lands, and the logging this margin exists for never happens.
 ///
 /// `the_budget_and_its_exit_margin_fit_inside_the_default_grace_period` asserts
-/// the rule rather than restating it. It cannot read a chart — no chart in this
-/// estate sets `terminationGracePeriodSeconds` — so it pins the INHERITED
+/// the rule rather than restating it. It cannot read a chart — the charts live
+/// in six other repositories, not this crate — so it pins the INHERITED
 /// default as a literal (ADR-0573) and goes red the day this constant is raised
 /// past what that default allows.
+///
+/// **Measured 2026-09-06 (ledger 690): all six module charts now DO set
+/// `terminationGracePeriodSeconds`, at 35s.** An earlier revision of this
+/// paragraph said no chart in the estate set the field; that stopped being
+/// true the day ledger 690 merged. It does not change what the test below
+/// asserts — the literal it pins is the floor a deployment inherits if it sets
+/// nothing, not any one chart's value, and this crate still cannot see six
+/// other repositories' YAML. Tying each chart's number to `DRAIN_BUDGET` is
+/// real, open work, named where the test's own doc comment explains it.
 pub const DRAIN_BUDGET: Duration = Duration::from_secs(25);
 
 /// What became of a drain.
@@ -196,12 +206,22 @@ mod tests {
     /// what is asserted now.
     ///
     /// **BOTH NUMBERS ARE LITERALS HERE ON PURPOSE (ADR-0573).** `DEFAULT_GRACE`
-    /// is Kubernetes' inherited default, not a value read from a chart: no chart
-    /// in this estate sets `terminationGracePeriodSeconds`, so there is nothing
-    /// to read. Should one begin to — ledger 690 proposes exactly that, at 30 —
-    /// this literal becomes the number that chart must not go under, and the two
-    /// should name each other rather than one deriving the other. A cross-repo
-    /// derivation is machinery this fact does not deserve.
+    /// is Kubernetes' inherited default, not a value read from a chart: this
+    /// crate cannot read a chart, because the charts live in six other
+    /// repositories.
+    ///
+    /// **Measured 2026-09-06 (ledger 690): the six module charts now DO set
+    /// `terminationGracePeriodSeconds`, at 35 — not the 30 this paragraph used
+    /// to predict.** They landed 5 (`preStop` sleep) + 25 (`DRAIN_BUDGET`) + 5
+    /// (the exit margin below), which still clears `DEFAULT_GRACE`, so the
+    /// assertion itself did not go stale — only its prediction did.
+    /// `DEFAULT_GRACE` stays the floor a deployment inherits if it sets
+    /// nothing, and it and a chart's value should still name each other rather
+    /// than one deriving the other — a cross-repo derivation is machinery this
+    /// fact does not deserve. That naming is real, open work: ledger 721 found
+    /// the charts' 35 is comment-derived, with no assertion tying it to
+    /// `DRAIN_BUDGET`, and that assertion belongs in each module's own repo,
+    /// beside the value it checks.
     ///
     /// `EXIT_MARGIN` is spelled here rather than exported: it is not a knob and
     /// not a bound any caller needs, it is the slack inside one inequality.
