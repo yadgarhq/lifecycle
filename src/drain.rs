@@ -46,13 +46,34 @@ use std::time::Duration;
 /// the constant was chosen against it; the test that compares the two lives in
 /// `iam`, because that is where both numbers are.
 ///
+/// **THAT LOWER-BOUND TEST NO LONGER WATCHES THE DEPLOYED NUMBER, and this
+/// paragraph used to imply it did.** `iam` reads its redemption floor from
+/// `REDEEM_RESPONSE_FLOOR_MS` with `env_required` (ADR-0569), so
+/// `DEFAULT_REDEEM_RESPONSE_FLOOR` survives as the measurement the chart's value
+/// was calibrated from and is read by no knob path. The assertion in
+/// `iam/src/serve.rs` compares this budget against that constant, which the
+/// chart happens to agree with today — so a deployment raising the floor changes
+/// the number that matters and leaves the assertion green. Nothing here can fix
+/// that: both of its numbers live in `iam`.
+///
 /// Below: it must expire before the SIGKILL on the SIGTERM path, or it bounds
-/// nothing there. Kubernetes defaults `terminationGracePeriodSeconds` to 30s and
-/// no chart in this estate sets or exposes it, so there is no rendered value to
-/// assert against and the relationship is stated here rather than faked as a
-/// test. 25s leaves five seconds to log and exit. **A deployment that lowers the
-/// grace period below 25s must lower this with it**, which is the one thing a
-/// reader has to carry away from this paragraph.
+/// nothing there. **The rule is `terminationGracePeriodSeconds >= DRAIN_BUDGET +
+/// 5s`, plus any `preStop` sleep**, and the five seconds are what this process
+/// needs to log the outcome and exit after the budget expires. At a 25s budget
+/// that is 30s, which is also what Kubernetes defaults to — so today the estate
+/// satisfies the rule by inheritance rather than by writing it down.
+///
+/// **A deployment that lowers the grace period below 30s must lower this with
+/// it**, which is the one thing a reader has to carry away from this paragraph.
+/// An earlier revision said "below 25s" and that was wrong by exactly the exit
+/// margin: at a 25s grace period the budget expires at the same instant SIGKILL
+/// lands, and the logging this margin exists for never happens.
+///
+/// `the_budget_and_its_exit_margin_fit_inside_the_default_grace_period` asserts
+/// the rule rather than restating it. It cannot read a chart — no chart in this
+/// estate sets `terminationGracePeriodSeconds` — so it pins the INHERITED
+/// default as a literal (ADR-0573) and goes red the day this constant is raised
+/// past what that default allows.
 pub const DRAIN_BUDGET: Duration = Duration::from_secs(25);
 
 /// What became of a drain.
@@ -165,13 +186,35 @@ mod tests {
     /// The relationship the constant exists inside, asserted rather than only
     /// described: a budget that outlasts Kubernetes' default grace period bounds
     /// nothing, because SIGKILL arrives first.
+    ///
+    /// **`<` WAS THE WRONG COMPARISON AND IT PASSED AT 29 SECONDS.** The doc
+    /// comment on [`DRAIN_BUDGET`] says "five seconds to log and exit"; a strict
+    /// inequality admits a budget that leaves one, or none but a nanosecond, and
+    /// the case would still have been green while the outcome line this crate
+    /// exists to write went unwritten. What the estate means is
+    /// `terminationGracePeriodSeconds >= DRAIN_BUDGET + EXIT_MARGIN`, and that is
+    /// what is asserted now.
+    ///
+    /// **BOTH NUMBERS ARE LITERALS HERE ON PURPOSE (ADR-0573).** `DEFAULT_GRACE`
+    /// is Kubernetes' inherited default, not a value read from a chart: no chart
+    /// in this estate sets `terminationGracePeriodSeconds`, so there is nothing
+    /// to read. Should one begin to — ledger 690 proposes exactly that, at 30 —
+    /// this literal becomes the number that chart must not go under, and the two
+    /// should name each other rather than one deriving the other. A cross-repo
+    /// derivation is machinery this fact does not deserve.
+    ///
+    /// `EXIT_MARGIN` is spelled here rather than exported: it is not a knob and
+    /// not a bound any caller needs, it is the slack inside one inequality.
     #[test]
-    fn the_budget_expires_before_the_default_grace_period() {
+    fn the_budget_and_its_exit_margin_fit_inside_the_default_grace_period() {
         const DEFAULT_GRACE: Duration = Duration::from_secs(30);
+        const EXIT_MARGIN: Duration = Duration::from_secs(5);
         assert!(
-            DRAIN_BUDGET < DEFAULT_GRACE,
-            "a {DRAIN_BUDGET:?} budget under a {DEFAULT_GRACE:?} grace period is not a budget: \
-             SIGKILL lands first and nothing this crate does is reached"
+            DRAIN_BUDGET.saturating_add(EXIT_MARGIN) <= DEFAULT_GRACE,
+            "a {DRAIN_BUDGET:?} budget plus a {EXIT_MARGIN:?} margin to log and exit does not \
+             fit inside a {DEFAULT_GRACE:?} grace period: SIGKILL lands before this process \
+             reports what became of the drain, and a budget nobody hears the outcome of is \
+             the silent failure this crate exists to prevent"
         );
     }
 }
