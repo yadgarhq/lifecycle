@@ -126,10 +126,11 @@ pub enum ScheduleError {
     Absent { path: String },
 
     #[error(
-        "{path} exists and cannot be read ({source}). The likeliest cause is a chart whose \
-         `mountPath` names the FILE rather than the directory holding it: kubelet then creates a \
-         DIRECTORY at this path and the read fails as `Is a directory`. Mount the ConfigMap at \
-         /etc/yadgar/config/<name> and let the key become the file inside it."
+        "A file this process must read exists and cannot be read. The likeliest cause is a \
+         chart whose `mountPath` names the FILE rather than the directory holding it: kubelet \
+         then creates a DIRECTORY at this path and the read fails as `Is a directory`. Mount the \
+         ConfigMap at /etc/yadgar/config/<name> and let the key become the file inside it. \
+         Reading {path} failed"
     )]
     Unreadable {
         path: String,
@@ -138,11 +139,10 @@ pub enum ScheduleError {
     },
 
     #[error(
-        "{path} does not have the shape this reader expects ({source}). Either the file is not \
-         parseable YAML at all, or a part of it is the wrong KIND: the document must be a mapping, \
-         and `tlsRotation` within it must be a mapping of knobs rather than a scalar or a list. \
-         The error in brackets names the part that did not fit. Note that a wrong-KIND file is \
-         still valid YAML, so a YAML linter will call it clean."
+        "The file is either not parseable YAML at all, or a part of it is the wrong KIND: the \
+         document must be a mapping, and `tlsRotation` within it must be a mapping of knobs \
+         rather than a scalar or a list. Note that a wrong-KIND file is still valid YAML, so a \
+         YAML linter will call it clean. {path} does not have the shape this reader expects"
     )]
     Malformed {
         path: String,
@@ -167,9 +167,9 @@ pub enum ScheduleError {
     Empty { knob: &'static str, path: String },
 
     #[error(
-        "{knob} in {path} is {value:?}, which is not a whole number of seconds ({source}). It is \
-         refused rather than replaced with a default, because a deployment that believes it set \
-         this and did not would run an interval nobody chose and see nothing wrong."
+        "A knob that is not a whole number of seconds is refused rather than replaced with a \
+         default, because a deployment that believes it set this and did not would run an \
+         interval nobody chose and see nothing wrong. {knob} in {path} is {value:?}"
     )]
     Unparsable {
         knob: &'static str,
@@ -1282,5 +1282,108 @@ mod tests {
     #[test]
     fn hex_renders_every_byte_as_two_digits() {
         assert_eq!(hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    }
+
+    /// The `Error::source()` walk a caller performs, inlined.
+    ///
+    /// This is `yadgar-telemetry`'s `diagnose::chain` byte for byte. It is
+    /// COPIED rather than depended on because the property under test is a
+    /// property of THIS crate's messages, and every module that rotates its
+    /// certificates depends on this crate.
+    fn flattened(error: &dyn std::error::Error) -> String {
+        let mut rendered = error.to_string();
+        let mut source = error.source();
+        while let Some(current) = source {
+            rendered.push_str(": ");
+            rendered.push_str(&current.to_string());
+            source = current.source();
+        }
+        rendered
+    }
+
+    /// LEDGER 737. A variant that marks a field `#[source]` must not also
+    /// interpolate that field into its own `#[error]` string.
+    ///
+    /// A caller that walks `Error::source()` appends every layer itself, so a
+    /// message that already carries the layer prints the inner cause TWICE.
+    /// Each variant is reached through the REAL path that produces it rather
+    /// than built by hand, because `Malformed` carries a `serde_norway::Error`
+    /// that cannot be constructed from outside that crate — and reaching all
+    /// three the same way keeps the case honest about what a deployment sees.
+    ///
+    /// The cause is taken from the error's OWN `source()` rather than written
+    /// as a literal, so the count cannot drift from what the type actually
+    /// carries.
+    #[test]
+    fn a_source_bearing_variant_does_not_also_interpolate_it() {
+        let (_, unparsable) =
+            document("tlsRotation:\n  pollSeconds: 60s\n  splayMaxSeconds: 300\n");
+        let (_, malformed) = document("tlsRotation: [1, 2]\n");
+
+        // `Unreadable` the way a deployment reaches it: a chart whose
+        // `mountPath` names the FILE leaves kubelet a DIRECTORY where the
+        // document belongs, and the read fails as `Is a directory`.
+        let root =
+            std::env::temp_dir().join(format!("yadgar-config-unreadable-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(SHARED_DOCUMENT)).unwrap();
+
+        let cases: Vec<(&str, ScheduleError)> = vec![
+            (
+                "Unreadable",
+                Configuration::under(&root).schedule().unwrap_err(),
+            ),
+            ("Malformed", malformed.schedule().unwrap_err()),
+            ("Unparsable", unparsable.schedule().unwrap_err()),
+        ];
+
+        for (variant, error) in cases {
+            assert!(
+                matches!(
+                    (variant, &error),
+                    ("Unreadable", ScheduleError::Unreadable { .. })
+                        | ("Malformed", ScheduleError::Malformed { .. })
+                        | ("Unparsable", ScheduleError::Unparsable { .. })
+                ),
+                "the {variant} case produced {error:?} instead"
+            );
+
+            let cause = std::error::Error::source(&error)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{variant} must keep its `#[source]` link — the cause \
+                         moves to the chain, it does not go away"
+                    )
+                })
+                .to_string();
+            let flat = flattened(&error);
+            let seen = flat.matches(&cause).count();
+            assert_eq!(
+                seen, 1,
+                "{variant} prints its cause {seen} time(s) in a walked chain, \
+                 not once.\n  cause:  {cause}\n  walked: {flat}"
+            );
+        }
+    }
+
+    /// LEDGER 737, stated as the whole operator-facing line rather than as a
+    /// count, so the diff shows a human what a boot refusal actually reads.
+    ///
+    /// `ParseIntError` is a `std` type, so its wording is the same everywhere
+    /// and this can be an equality rather than a `contains`.
+    #[test]
+    fn the_walked_message_for_an_unparsable_knob_reads_end_to_end() {
+        let (path, config) = document("tlsRotation:\n  pollSeconds: 60s\n  splayMaxSeconds: 300\n");
+        let error = config.schedule().unwrap_err();
+        assert_eq!(
+            flattened(&error),
+            format!(
+                "A knob that is not a whole number of seconds is refused rather \
+                 than replaced with a default, because a deployment that \
+                 believes it set this and did not would run an interval nobody \
+                 chose and see nothing wrong. tlsRotation.pollSeconds in {} is \
+                 \"60s\": invalid digit found in string",
+                path.display()
+            )
+        );
     }
 }
