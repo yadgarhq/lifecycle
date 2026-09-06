@@ -1107,7 +1107,10 @@ mod tests {
             "got {error:?}"
         );
         let message = error.to_string();
-        assert!(message.contains(POLL_KNOB), "must name the knob: {message}");
+        assert!(
+            message.contains("tlsRotation.pollSeconds"),
+            "must name the knob: {message}"
+        );
         assert!(
             message.contains(&path.display().to_string()),
             "must name the file: {message}"
@@ -1160,10 +1163,24 @@ mod tests {
     #[test]
     fn a_zero_poll_interval_is_refused() {
         let (_, config) = document("tlsRotation:\n  pollSeconds: 0\n  splayMaxSeconds: 300\n");
-        assert!(matches!(
-            config.schedule(),
-            Err(ScheduleError::ZeroPoll { .. })
-        ));
+        let error = config.schedule().unwrap_err();
+        assert!(matches!(error, ScheduleError::ZeroPoll { .. }));
+
+        // LEDGER 732. `ZeroPoll` is the one message that interpolates BOTH knob
+        // constants, and nothing asserted its text — so renaming either
+        // constant silently rewrote the line an operator reads at a refused
+        // boot. The literals are the pin; see
+        // `the_knob_paths_are_the_ones_an_operator_edits`.
+        let message = error.to_string();
+        assert!(
+            message.contains("tlsRotation.pollSeconds"),
+            "must name the knob that is 0: {message}"
+        );
+        assert!(
+            message.contains("tlsRotation.splayMaxSeconds"),
+            "must name the knob whose 0 IS supported, or the contrast it draws \
+             is unreadable: {message}"
+        );
     }
 
     #[test]
@@ -1265,6 +1282,33 @@ mod tests {
             Configuration::mounted().path(),
             Path::new("/etc/yadgar/config/shared/shared.yaml")
         );
+    }
+
+    /// LEDGER 732. A KNOB PATH IS AN INTERFACE TO AN OPERATOR, exactly as the
+    /// mount path above is an interface to a chart.
+    ///
+    /// The KNOB constants reach an operator only as text inside a
+    /// `ScheduleError`, and every assertion about them read the constant back
+    /// into itself — `matches!(.. if knob == POLL_KNOB)`,
+    /// `message.contains(POLL_KNOB)`. A certifying fixture: measured by
+    /// mutation on the commit this test was added to, renaming `POLL_KNOB` left
+    /// the suite at 28 passed, 0 failed, and renaming `SPLAY_MAX_KNOB` did the
+    /// same. So the line a boot refusal prints was pinned by nothing, and an
+    /// operator could be sent looking for a key the document does not spell.
+    ///
+    /// The LEAF constants are deliberately NOT pinned here. They sit on the
+    /// READ path and the fixture YAML spells them literally, so they are
+    /// already certified by use: renaming `POLL_LEAF` reds 8 of 28 and
+    /// `SPLAY_MAX_LEAF` reds 5 of 28. Adding an equality for them would assert
+    /// something the suite already proves, and would be weaker than the proof.
+    ///
+    /// Each literal here is the FULL dotted path, because that is what a
+    /// refusal has to print: `shared.yaml` holds several sections and
+    /// `pollSeconds` alone would not say which one.
+    #[test]
+    fn the_knob_paths_are_the_ones_an_operator_edits() {
+        assert_eq!(POLL_KNOB, "tlsRotation.pollSeconds");
+        assert_eq!(SPLAY_MAX_KNOB, "tlsRotation.splayMaxSeconds");
     }
 
     #[test]
