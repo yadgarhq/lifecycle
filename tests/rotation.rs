@@ -516,6 +516,69 @@ fn the_unreadable_count_is_exported_under_the_name_a_dashboard_queries() {
     );
 }
 
+/// **THE GAUGE MUST EXIST BEFORE THE FIRST POLL EVER COMPLETES, not only after
+/// one has run.** [`watch_with_seed`]'s loop already writes
+/// [`WATCHED_FILES_UNREADABLE`] every tick, unconditionally — the defect this
+/// pins is the window BEFORE the first tick, which used to hold nothing at all.
+/// An absent series and a healthy zero are different things to a query: `> 0`
+/// never fires on an absent series, and a dashboard shows a gap rather than a
+/// zero. The same shape as `dial`'s `UPSTREAM_NEVER_RESOLVED`, which is written
+/// "before the first tick, and both ways" for exactly this reason.
+///
+/// A `metrics::LocalRecorderGuard` is used rather than `with_local_recorder`,
+/// deliberately: the recorder has to stay the thread-local default across the
+/// `.await` in [`tokio::task::yield_now`], which a closure-scoped guard cannot
+/// do since `tokio::spawn` only SCHEDULES the task rather than running it.
+///
+/// `start_paused` makes this deterministic rather than a race against a real
+/// clock: the schedule's poll interval is an hour, and the paused clock does
+/// not move on its own while this test still holds a runnable task, so the
+/// single `yield_now` below runs the spawned watch up to its first pending
+/// `.await` — the `sleep` — and no further.
+#[tokio::test(start_paused = true)]
+async fn the_unreadable_gauge_is_present_at_zero_before_the_first_poll() {
+    let mount = Mount::new(&generation("yadgar"));
+    let listener = mount.listener();
+    let watched = Inputs::of(SERVICE, &[&listener]);
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter: Snapshotter = recorder.snapshotter();
+    let _guard = metrics::set_default_local_recorder(&recorder);
+
+    // Long enough that nothing in this test could ever wait it out; the point
+    // is what exists BEFORE this elapses, not a race against it.
+    let schedule = Schedule::new(Duration::from_secs(3600), Duration::ZERO);
+    let task = tokio::spawn(rotate::watch_with_seed(watched, schedule, 0));
+
+    // Runs the spawned watch synchronously up to and including its first
+    // pending `.await`, and no further — the paused clock never advances on
+    // its own while this task is still runnable.
+    tokio::task::yield_now().await;
+
+    let emitted = snapshotter.snapshot().into_vec();
+    // A metrics-util built against another `metrics` major links a SECOND
+    // facade: everything compiles, nothing is captured, and every assertion
+    // below would pass vacuously against an empty snapshot.
+    assert_eq!(
+        emitted.len(),
+        1,
+        "the gauge must exist before the first poll completes; a healthy pod \
+         must not be indistinguishable from one whose watcher never started"
+    );
+    let (composite, _unit, _description, value) = &emitted[0];
+    assert_eq!(composite.key().name(), WATCHED_FILES_UNREADABLE);
+    assert_eq!(
+        match value {
+            DebugValue::Gauge(count) => count.into_inner(),
+            other => panic!("expected a gauge, got {other:?}"),
+        },
+        0.0,
+        "nothing is unreadable yet; this must be a measured zero, not be absent"
+    );
+
+    task.abort();
+}
+
 /// NOTHING IS PUBLISHED WHEN THERE IS NOTHING TO PUBLISH. An invented number is
 /// worse than a missing series: a dashboard cannot tell it apart from a real one.
 #[test]
