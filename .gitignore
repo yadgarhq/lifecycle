@@ -1,1 +1,7 @@
 target
+
+# scratch PR-body files agents write while reviewing. Ignored here, in the
+# repository, instead of relying on a contributor's machine-wide git config —
+# that cover exists on one machine and reaches no other clone, no CI, and no
+# other contributor.
+.local-review/
