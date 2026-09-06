@@ -196,12 +196,19 @@ mod tests {
     /// what is asserted now.
     ///
     /// **BOTH NUMBERS ARE LITERALS HERE ON PURPOSE (ADR-0573).** `DEFAULT_GRACE`
-    /// is Kubernetes' inherited default, not a value read from a chart: no chart
-    /// in this estate sets `terminationGracePeriodSeconds`, so there is nothing
-    /// to read. Should one begin to — ledger 690 proposes exactly that, at 30 —
-    /// this literal becomes the number that chart must not go under, and the two
-    /// should name each other rather than one deriving the other. A cross-repo
-    /// derivation is machinery this fact does not deserve.
+    /// is Kubernetes' inherited default, not a value read from a chart: no
+    /// MERGED chart in this estate sets `terminationGracePeriodSeconds`, so
+    /// there is nothing to read.
+    ///
+    /// **`DEFAULT_GRACE` IS THE FLOOR THIS BUDGET MUST FIT UNDER, NOT A NUMBER
+    /// ANY CHART OWES.** Ledger 690 is adding the field, and its own arithmetic
+    /// is this inequality: `35 = 5 (preStop sleep) + 25 (this budget) + 5 (the
+    /// margin above)`. A chart sitting ABOVE the floor for its own reasons is
+    /// fine and this case says nothing about it; a chart going UNDER it is the
+    /// failure, and only that direction matters here. The two files name each
+    /// other rather than one deriving the other — a cross-repository derivation
+    /// is machinery this fact does not deserve, and there is no mechanism in the
+    /// estate to reuse for it.
     ///
     /// `EXIT_MARGIN` is spelled here rather than exported: it is not a knob and
     /// not a bound any caller needs, it is the slack inside one inequality.
