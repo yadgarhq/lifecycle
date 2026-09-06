@@ -82,8 +82,30 @@ use std::time::Duration;
 /// true the day ledger 690 merged. It does not change what the test below
 /// asserts — the literal it pins is the floor a deployment inherits if it sets
 /// nothing, not any one chart's value, and this crate still cannot see six
-/// other repositories' YAML. Tying each chart's number to `DRAIN_BUDGET` is
-/// real, open work, named where the test's own doc comment explains it.
+/// other repositories' YAML.
+///
+/// **WHERE EACH CHART'S NUMBER GETS TIED TO THIS CONSTANT IS SETTLED, AND IT
+/// IS NOT HERE (ledger 721).** It is `tests/chart_grace_period.rs` in each
+/// module's OWN repository, which reads `terminationGracePeriodSeconds` and
+/// `preStopSleepSeconds` out of its own `chart/values.yaml` and asserts them
+/// against this constant AS THAT MODULE PINS IT. That is the only place
+/// the check can live: a chart must agree with the BINARY THAT SHIPS, and the
+/// binary that ships carries whatever tag that repository's `Cargo.toml` names
+/// (ADR-0526) rather than whatever this file says today. Those tests therefore
+/// red when a module BUMPS ITS PIN, which is the moment that module can act —
+/// and nothing they do makes this crate unable to break a chart in the window
+/// between two bumps.
+///
+/// **SIX SUCH PULL REQUESTS STAND OPEN AS THIS IS WRITTEN (2026-09-06), NOT
+/// MERGED**, and the distinction is the one ADR-0602 exists to record: a claim
+/// measured against a working tree and written as though it were `origin/main`
+/// is how the paragraph above this one went wrong the first time. What is
+/// settled here is the MECHANISM and its location, not six merges.
+///
+/// What this crate can do about that window is one line, and it is
+/// `the_drain_budget_is_the_literal_six_charts_derive_from` below — written in
+/// plain backticks rather than as an intra-doc link for the reason the crate
+/// docs give about any item behind a `cfg`.
 pub const DRAIN_BUDGET: Duration = Duration::from_secs(25);
 
 /// What became of a drain.
@@ -218,10 +240,14 @@ mod tests {
     /// `DEFAULT_GRACE` stays the floor a deployment inherits if it sets
     /// nothing, and it and a chart's value should still name each other rather
     /// than one deriving the other — a cross-repo derivation is machinery this
-    /// fact does not deserve. That naming is real, open work: ledger 721 found
-    /// the charts' 35 is comment-derived, with no assertion tying it to
-    /// `DRAIN_BUDGET`, and that assertion belongs in each module's own repo,
-    /// beside the value it checks.
+    /// fact does not deserve. **That naming is done, and it is done in the six
+    /// module repositories rather than here (ledger 721):** each gains a
+    /// `tests/chart_grace_period.rs` that reads its own chart's two numbers and
+    /// checks them against the `DRAIN_BUDGET` that module pins by tag — six
+    /// pull requests, open rather than merged as this is written. This
+    /// case is unchanged by that and stays worth running — `DEFAULT_GRACE` is
+    /// the floor a deployment with no chart at all inherits, which no module's
+    /// test covers.
     ///
     /// `EXIT_MARGIN` is spelled here rather than exported: it is not a knob and
     /// not a bound any caller needs, it is the slack inside one inequality.
@@ -235,6 +261,45 @@ mod tests {
              fit inside a {DEFAULT_GRACE:?} grace period: SIGKILL lands before this process \
              reports what became of the drain, and a budget nobody hears the outcome of is \
              the silent failure this crate exists to prevent"
+        );
+    }
+
+    /// The budget is pinned by the literal SIX CHARTS DERIVE THEIR GRACE PERIOD
+    /// FROM, so moving it is a two-line change rather than a one-line one.
+    ///
+    /// **THIS IS THE ONLY THING THIS CRATE CAN DO ABOUT THE CHARTS, and it is
+    /// worth doing precisely because it is not much.** Each module's
+    /// `chart/values.yaml` renders `terminationGracePeriodSeconds: 35` and
+    /// derives it as 5 (`preStop` sleep) + 25 (this constant) + 5 (the exit
+    /// margin above). Ledger 721 asserts that derivation in each module's own
+    /// `tests/chart_grace_period.rs` — but against the budget IT PINS BY TAG,
+    /// so those six tests stay green from the moment this line changes until
+    /// the day each module bumps. Somebody editing this file needs to learn
+    /// there and then that six other repositories carry the number, and the
+    /// only construction that tells them is a literal they must edit too.
+    ///
+    /// ADR-0599, in its own words: a bound another component's configuration
+    /// must respect is pinned by at least one `assert_eq!` against the literal,
+    /// never only through the constant that carries it — because every in-repo
+    /// reader moves with the constant and the compiler is exactly blind here.
+    /// The cost is the point: "the second line is where the author notices the
+    /// value is an interface".
+    ///
+    /// **CHANGING THIS LINE IS NOT FORBIDDEN, and a reader reaching it after a
+    /// deliberate change should not revert it.** Raise both numbers, then raise
+    /// `terminationGracePeriodSeconds` in `gateway`, `iam`, `task`, `iam-db`,
+    /// `task-db` and `project-db` — each of which will red on its own next bump
+    /// if you do not.
+    #[test]
+    fn the_drain_budget_is_the_literal_six_charts_derive_from() {
+        assert_eq!(
+            DRAIN_BUDGET.as_secs(),
+            25,
+            "this budget crossed a boundary this repository does not own: six module charts \
+             render `terminationGracePeriodSeconds: 35` as 5 + 25 + 5, and none of them is \
+             recompiled by a change here. Raise each chart to 5 + {} + 5 in its own repository, \
+             then raise the literal on this line",
+            DRAIN_BUDGET.as_secs()
         );
     }
 }
