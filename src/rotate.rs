@@ -1038,6 +1038,98 @@ mod tests {
         assert_eq!(configured.reported(Presented::Serving, true), "unknown");
     }
 
+    /// A self-signed leaf, PEM. Minted per case rather than checked in, for the
+    /// reason `Cargo.toml` gives about a fixture key in a repository.
+    fn self_signed(name: &str) -> String {
+        let key = rcgen::KeyPair::generate().expect("a key pair");
+        let mut params = rcgen::CertificateParams::new(vec![name.to_string()])
+            .expect("a subject alternative name");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, name);
+        params.self_signed(&key).expect("a self-signed leaf").pem()
+    }
+
+    /// A directory of this case's own, so a stale file cannot make a broken
+    /// implementation pass.
+    fn scratch() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "yadgar-lifecycle-reported-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("a scratch directory");
+        root
+    }
+
+    /// **`_before` IS THE LEAF THIS PROCESS LOADED AND `_after` IS THE ONE ON
+    /// DISK**, and the rotation line is worth nothing unless they are.
+    ///
+    /// [`watch`] prints `serving_before = reported(.., false)` beside
+    /// `serving_after = reported(.., true)`, so an operator can read which
+    /// certificate the pod is leaving and which one it is restarting onto.
+    /// NOTHING PINNED IT. `reported` was exercised only for `none` and for
+    /// `unknown` — and in both of those cases the two arms answer the SAME
+    /// string, so swapping the bools at the four call sites, or reading the
+    /// loaded bytes on both sides, compiled, passed clippy and passed every
+    /// other case in this crate while printing one fingerprint twice.
+    ///
+    /// ADR-0523 makes the fingerprints an obligation of the decision, not a
+    /// decoration on the log line: "it logs the old and new fingerprints".
+    #[test]
+    fn the_boot_baseline_and_the_file_on_disk_are_reported_apart() {
+        let root = scratch();
+        let path = root.join("tls.pem");
+        let loaded = self_signed("before.yadgar.internal");
+        std::fs::write(&path, &loaded).expect("the leaf this process reads at boot");
+
+        let inputs = Inputs::new("test").certificate(Presented::Serving, &path);
+        let baseline = inputs.reported(Presented::Serving, false);
+        assert_eq!(
+            baseline.len(),
+            64,
+            "SHA-256 over the loaded leaf's DER, hex"
+        );
+        assert_eq!(
+            inputs.reported(Presented::Serving, true),
+            baseline,
+            "nothing has rotated, so both sides name the same certificate"
+        );
+
+        // WHAT KUBELET DOES TO A DIRECTORY MOUNT: the same path, other bytes.
+        let rotated_onto = self_signed("after.yadgar.internal");
+        assert_ne!(loaded, rotated_onto, "two mints must differ");
+        std::fs::write(&path, &rotated_onto).expect("the leaf cert-manager wrote");
+
+        assert_eq!(
+            inputs.reported(Presented::Serving, false),
+            baseline,
+            "`serving_before` must keep naming the leaf that was LOADED, never the file"
+        );
+        let after = inputs.reported(Presented::Serving, true);
+        assert_eq!(after.len(), 64, "SHA-256 over the rotated leaf's DER, hex");
+        assert_ne!(
+            after, baseline,
+            "`serving_after` must name the leaf on disk, or the line reports a rotation by \
+             printing one fingerprint twice"
+        );
+
+        // AND THE TWO KINDS ARE NOT EACH OTHER. One process holds both, so a
+        // `reported` that answered with the serving leaf under both labels would
+        // land on a plausible fingerprint and pass every assertion above.
+        let client = root.join("client.pem");
+        std::fs::write(&client, self_signed("caller.yadgar.internal")).expect("a client leaf");
+        let both = inputs.certificate(Presented::Client, &client);
+        assert_ne!(
+            both.reported(Presented::Client, false),
+            both.reported(Presented::Serving, false),
+            "the serving and client leaves are different certificates"
+        );
+
+        std::fs::remove_dir_all(&root).expect("the scratch directory");
+    }
+
     #[test]
     fn an_absurd_maximum_neither_panics_nor_overshoots() {
         for max in [
