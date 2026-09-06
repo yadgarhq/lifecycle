@@ -774,6 +774,18 @@ pub async fn watch(inputs: Inputs, schedule: Schedule) {
 /// [`watch`] with the splay's seed supplied, so a test can assert an exact wait
 /// rather than a coin toss.
 pub async fn watch_with_seed(inputs: Inputs, schedule: Schedule, seed: u64) {
+    // BEFORE THE FIRST POLL, AND BOTH WAYS. `schedule.poll` stands between here
+    // and the loop's first `publish_unreadable`, so a gauge first written there
+    // is silent for the whole of that wait — the same window `dial`'s
+    // `UPSTREAM_NEVER_RESOLVED` closes for the same reason. A series that does
+    // not exist yet cannot be told apart from a healthy pod, a crashed one, or a
+    // build that never linked this crate, which is the shape ADR-0556 and
+    // ADR-0558 name for a different metric. Zero here is a measurement, not an
+    // invented number: `export_unreadable` already publishes unconditionally
+    // for exactly that reason.
+    let unread = inputs.unread_at_boot();
+    inputs.publish_unreadable(unread.len());
+
     if inputs.is_empty() {
         // NOTHING TO WATCH IS NOT A REASON TO EXIT. A process holding no
         // material has nothing that can go stale.
@@ -786,7 +798,6 @@ pub async fn watch_with_seed(inputs: Inputs, schedule: Schedule, seed: u64) {
     // mount being rewritten, this one is a path that was already wrong when the
     // process started. The watcher carries on over every OTHER file, because one
     // bad path silently retiring six good ones is the failure this replaced.
-    let unread = inputs.unread_at_boot();
     if !unread.is_empty() {
         tracing::error!(
             unreadable = unread
