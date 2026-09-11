@@ -42,6 +42,15 @@ repos:
       - id: actionlint
       - id: cargo-fmt
       - id: cargo-clippy
+      # LEDGER 719. The mechanical ceilings — 500 lines a file, 120 a
+      # function — and clippy's complexity lints beside them, same as the
+      # seven consumers of this crate. This repository already pinned
+      # `yadgarhq/actions` at v1.20.0 for the hooks above (newer than the
+      # v1.18.3 the seven consumers used for THEIR adoption), and both ids
+      # are unchanged between those revs, so this adds the ids under the
+      # existing pin rather than introducing a second, older rev block.
+      - id: complexity
+      - id: cargo-clippy-complexity
       - id: cargo-deny
       - id: observe-coverage
       - id: helm-lint
