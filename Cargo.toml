@@ -60,7 +60,7 @@ tracing = "0.1"
 # EVERYTHING BELOW IS `rotate`-ONLY. Each is used in `src/rotate.rs` and nowhere
 # else, which is what makes one gate over the module the whole of the split.
 thiserror = { version = "2", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 # PEM to DER and no further, which is all the watcher needs to fingerprint a
 # leaf. The same parser tonic and rustls use, so "the first certificate in this
 # file" means the same thing here as it does to the listener.
