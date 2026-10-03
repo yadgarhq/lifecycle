@@ -15,6 +15,12 @@
 //! service that only wants to hear SIGTERM should take. `Cargo.toml` records
 //! what the two builds measure and why `drain` has no gate of its own.
 //!
+//! `serve-tls` is OFF by default and carries `serve_tls::ServerTls`: the
+//! listener's identity and its client-certificate verification (`off`,
+//! `optional`, `required`), lifted out of six gRPC servers (ADR-0846). It pulls
+//! tonic's `server` with the `tls-ring` provider, which is why it is opt-in —
+//! a consumer that only drains must not pay for a gRPC stack.
+//!
 //! **Every `rotate::*` name in these crate docs is written in plain backticks
 //! rather than as an intra-doc link, and deliberately.** A link to an item
 //! behind a `cfg` is a broken link in the build where the `cfg` is off.
@@ -78,5 +84,7 @@
 pub mod drain;
 #[cfg(feature = "rotate")]
 pub mod rotate;
+#[cfg(feature = "serve-tls")]
+pub mod serve_tls;
 
 pub use drain::{drain_within, shutdown, Drain, DRAIN_BUDGET};
