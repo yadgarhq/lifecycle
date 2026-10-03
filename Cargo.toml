@@ -45,6 +45,16 @@ rotate = [
   "dep:thiserror",
   "dep:x509-parser",
 ]
+# THE LISTENER'S TRANSPORT, LIFTED ONCE (ADR-0846). Six gRPC servers held a
+# near-identical `ServerTls` copy and none verified a client certificate; this is
+# the one implementation they adopt, so a security control cannot drift six ways.
+#
+# OPT-IN, and that is the cost argument `rotate` already makes, in reverse. This
+# feature pulls tonic's server and rustls; a consumer that only wants the drain
+# or the watcher must not pay for a gRPC stack, which is the rule the
+# `[dependencies]` comment below states. `rustls-pki-types` and `thiserror` are
+# shared with `rotate`, so they are optional once and named by both.
+serve-tls = ["dep:rustls", "dep:rustls-pki-types", "dep:thiserror", "dep:tonic"]
 
 [dependencies]
 # NO TRANSPORT, DELIBERATELY. `drain_within` is generic over a
@@ -88,6 +98,45 @@ serde_norway = { version = "0.9", optional = true }
 # library that installs an exporter decides the backend for every service that
 # links it. The binary installs one.
 metrics = { version = "0.24", optional = true }
+# `serve-tls`-ONLY. `server` for `Server` and `ServerTlsConfig`; `tls-ring` for
+# the crypto provider. NOT `transport`, which drags `channel` and a client stack
+# no listener needs, and NOT the default features, which are `transport` again.
+#
+# **ONE PROVIDER, AND IT IS MEASURED RATHER THAN ASSUMED.** tonic's acceptor
+# builds its config with `rustls::ServerConfig::builder()`, which reads the
+# PROCESS-DEFAULT crypto provider and installs one from rustls's crate features.
+# With both `ring` and `aws-lc-rs` compiled in there is no single default, and
+# the first TLS listener panics at boot. `ring` is pinned because no adopter
+# links the other one: `aws-lc-rs` appears in NONE of the six adopters'
+# `Cargo.lock` files (`iam`, `iam-db`, `task`, `task-db`, `project`,
+# `project-db`, `origin/main`, checked 2026-10-03), and the `-db` modules
+# already link `ring` through sqlx `tls-rustls-ring`. That is a fact about
+# those lock files today; an adopter that later pulls `aws-lc-rs` in would
+# reintroduce the panic. MEASURED for this crate 2026-10-03, not reasoned about:
+#
+#   cargo tree -e normal --features serve-tls -i aws-lc-rs
+#     error: package ID specification `aws-lc-rs` did not match any packages
+#   cargo tree -e normal,build --all-features --target all -i aws-lc-rs
+#     error: package ID specification `aws-lc-rs` did not match any packages
+#   cargo tree -e normal --features serve-tls -i ring
+#     ring v0.17.14 <- rustls v0.23.45 <- tokio-rustls v0.26.6 <- tonic v0.14.6
+#   cargo tree -e normal -i tonic          (default features)
+#     warning: nothing to print.
+#
+# So `aws-lc-rs` is not in the lock file at all, and a consumer that does not
+# enable the feature builds no tonic.
+tonic = { version = "0.14", default-features = false, features = [
+  "server",
+  "tls-ring",
+], optional = true }
+# `serve-tls`-ONLY, and named for ONE call: `ServerTls::builder` installs ring as
+# the process-default provider when none is installed yet, so the boot panic the
+# comment above describes becomes the provider ADR-0846 pins. Already in the tree
+# through tokio-rustls; `ring` and `std` only, never the `aws_lc_rs` default.
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+], optional = true }
 
 # THE TWO ROTATION SUITES NAME THE FEATURE THEY NEED, because a test target
 # cannot be gated any other way: Cargo forbids an optional dev-dependency, so
@@ -105,6 +154,21 @@ required-features = ["rotate"]
 [[test]]
 name = "assembly"
 required-features = ["rotate"]
+
+# The `serve-tls` suites, gated for the same reason. CI's `cargo test
+# --all-features` is the run that reaches them; the feature-off run skips the
+# targets rather than failing to compile them.
+[[test]]
+name = "serve_tls_config"
+required-features = ["serve-tls"]
+
+[[test]]
+name = "serve_tls_handshake"
+required-features = ["serve-tls"]
+
+[[test]]
+name = "serve_tls_watch"
+required-features = ["serve-tls", "rotate"]
 
 [dev-dependencies]
 # `test-util` for a paused clock, `net` for the drain rig's real listener.
@@ -124,6 +188,26 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"]
 # another major links a SECOND facade, and then the snapshot is empty while
 # every assertion still compiles and passes.
 metrics-util = { version = "0.20", features = ["debugging"] }
+# THE CLIENT HALF OF THE `serve-tls` HANDSHAKES. A listener's client-auth mode
+# is only proved by a real client presenting (or withholding) a certificate, so
+# the suites dial with tonic's own channel. `router` serves `Routes::default()`;
+# `codegen` re-exports the `Service` trait the rig sends its one request with.
+# Dev-only: Cargo unifies these into the TEST build, so `cargo check --lib
+# --features serve-tls` is what proves the library builds on `server` alone.
+tonic = { version = "0.14", default-features = false, features = [
+  "channel",
+  "codegen",
+  "router",
+  "server",
+  "tls-ring",
+] }
+# `TcpListenerStream`: bind first, then serve, so no port is picked and reopened.
+tokio-stream = { version = "0.1", features = ["net"] }
+# Captures the warning a configured-but-unused client CA emits, synchronously,
+# with `tracing::subscriber::with_default`.
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+  "fmt",
+] }
 
 [lints.rust]
 unsafe_code = "forbid"
