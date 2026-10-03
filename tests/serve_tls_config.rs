@@ -35,7 +35,12 @@ fn read(pairs: &[(&str, String)]) -> Result<Option<ServerTls>, ServeTlsError> {
 
 fn refusal(pairs: &[(&str, String)]) -> String {
     match read(pairs) {
-        Ok(tls) => panic!("{pairs:?} must refuse the boot, got {tls:?}"),
+        // KEY NAMES ONLY. The values are file paths to key material, and
+        // CodeQL's `rust/cleartext-logging` reads a panic message as a log.
+        Ok(_) => {
+            let keys: Vec<&str> = pairs.iter().map(|(k, _)| *k).collect();
+            panic!("{keys:?} must refuse the boot, and it booted")
+        }
         Err(e) => e.to_string(),
     }
 }
