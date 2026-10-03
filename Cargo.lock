@@ -1579,6 +1579,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "rcgen",
+ "rustls",
  "rustls-pki-types",
  "serde",
  "serde_norway",

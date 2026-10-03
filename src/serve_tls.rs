@@ -98,9 +98,9 @@ impl FromStr for ClientAuth {
 #[derive(Debug, thiserror::Error)]
 pub enum ServeTlsError {
     #[error(
-        "{var} is not set. Set it to \"1\" to serve TLS or \"0\" to serve cleartext, through \
-         the chart value `{chart}`; an absent value refuses to boot rather than defaulting to \
-         cleartext (ADR-0845)"
+        "{var} is not set. Set the chart value `{chart}` to true (it renders \"1\", TLS) or \
+         false (it renders \"0\", cleartext); an absent value refuses to boot rather than \
+         defaulting to cleartext (ADR-0845)"
     )]
     EnabledMissing { var: String, chart: String },
 
@@ -143,8 +143,14 @@ pub enum ServeTlsError {
         enabled_chart: String,
     },
 
-    #[error("{enabled_var} is \"1\" but {var} is not set")]
-    NoServingFile { enabled_var: String, var: String },
+    #[error(
+        "{enabled_var} is \"1\" but {var} is not set. Set the chart value `{chart}` (ADR-0845)"
+    )]
+    NoServingFile {
+        enabled_var: String,
+        var: String,
+        chart: String,
+    },
 
     #[error(
         "{auth_var} is `{mode}` but {var} is not set, so there is no authority to verify a \
@@ -274,6 +280,7 @@ impl ServerTls {
                 .ok_or_else(|| ServeTlsError::NoServingFile {
                     enabled_var: keys.var("ENABLED"),
                     var: keys.var(suffix),
+                    chart: keys.chart("certSecret"),
                 })
         };
         Ok(Some(Self {
@@ -312,7 +319,13 @@ impl ServerTls {
     /// client verifier — so a bad mount refuses at boot rather than failing a
     /// stranger's first handshake. The files are read HERE rather than by tonic
     /// so the refusal names WHICH file was wrong.
+    ///
+    /// Installs ring as the process default ONLY if no provider is installed
+    /// yet; a binary that installs its own provider before calling `builder()`
+    /// keeps it. This turns the ambiguous-features boot panic into the ring
+    /// provider ADR-0846 pins.
     pub fn builder(&self) -> Result<Server, ServeTlsError> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let identity = Identity::from_pem(
             read(&self.cert_file, "serving certificate")?,
             read(&self.key_file, "serving private key")?,

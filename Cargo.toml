@@ -54,7 +54,7 @@ rotate = [
 # or the watcher must not pay for a gRPC stack, which is the rule the
 # `[dependencies]` comment below states. `rustls-pki-types` and `thiserror` are
 # shared with `rotate`, so they are optional once and named by both.
-serve-tls = ["dep:rustls-pki-types", "dep:thiserror", "dep:tonic"]
+serve-tls = ["dep:rustls", "dep:rustls-pki-types", "dep:thiserror", "dep:tonic"]
 
 [dependencies]
 # NO TRANSPORT, DELIBERATELY. `drain_within` is generic over a
@@ -128,6 +128,14 @@ metrics = { version = "0.24", optional = true }
 tonic = { version = "0.14", default-features = false, features = [
   "server",
   "tls-ring",
+], optional = true }
+# `serve-tls`-ONLY, and named for ONE call: `ServerTls::builder` installs ring as
+# the process-default provider when none is installed yet, so the boot panic the
+# comment above describes becomes the provider ADR-0846 pins. Already in the tree
+# through tokio-rustls; `ring` and `std` only, never the `aws_lc_rs` default.
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
 ], optional = true }
 
 # THE TWO ROTATION SUITES NAME THE FEATURE THEY NEED, because a test target

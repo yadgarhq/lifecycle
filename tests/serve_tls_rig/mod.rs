@@ -145,7 +145,9 @@ impl TempPem {
             .write(true)
             .create_new(true)
             .open(&path)
-            .unwrap_or_else(|e| panic!("{} already exists or cannot be made: {e}", path.display()));
+            .unwrap_or_else(|e| {
+                panic!("a temporary PEM file already exists or cannot be made: {e}")
+            });
         file.write_all(contents.as_bytes()).unwrap();
         Self(path)
     }

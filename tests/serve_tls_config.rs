@@ -53,9 +53,9 @@ fn s(v: &str) -> String {
 /// `tls.enabled` (ADR-0845). Absence used to mean cleartext.
 #[test]
 fn an_absent_or_empty_tls_switch_refuses_naming_the_variable_and_the_chart_key() {
-    let want = "LISTEN_TLS_ENABLED is not set. Set it to \"1\" to serve TLS or \"0\" to serve \
-                cleartext, through the chart value `tls.enabled`; an absent value refuses to \
-                boot rather than defaulting to cleartext (ADR-0845)";
+    let want = "LISTEN_TLS_ENABLED is not set. Set the chart value `tls.enabled` to true (it \
+                renders \"1\", TLS) or false (it renders \"0\", cleartext); an absent value \
+                refuses to boot rather than defaulting to cleartext (ADR-0845)";
     let auth = ("LISTEN_TLS_CLIENT_AUTH", s("off"));
     assert_eq!(refusal(std::slice::from_ref(&auth)), want);
     for empty in ["", "   "] {
@@ -190,11 +190,13 @@ fn tls_enabled_without_a_certificate_or_a_key_refuses() {
     let without_key = [head[0].clone(), head[1].clone(), cert];
     assert_eq!(
         refusal(&without_cert),
-        "LISTEN_TLS_ENABLED is \"1\" but LISTEN_TLS_CERT_FILE is not set"
+        "LISTEN_TLS_ENABLED is \"1\" but LISTEN_TLS_CERT_FILE is not set. Set the chart value \
+         `tls.certSecret` (ADR-0845)"
     );
     assert_eq!(
         refusal(&without_key),
-        "LISTEN_TLS_ENABLED is \"1\" but LISTEN_TLS_KEY_FILE is not set"
+        "LISTEN_TLS_ENABLED is \"1\" but LISTEN_TLS_KEY_FILE is not set. Set the chart value \
+         `tls.certSecret` (ADR-0845)"
     );
 }
 
@@ -238,7 +240,7 @@ fn builder_refusal(ca_path: &str) -> String {
     .unwrap()
     .unwrap();
     match tls.builder() {
-        Ok(_) => panic!("a client CA file at {ca_path} must refuse the boot"),
+        Ok(_) => panic!("a verifying listener with this client CA file must refuse the boot"),
         Err(e) => e.to_string(),
     }
 }
