@@ -106,7 +106,10 @@ use std::time::Duration;
 /// `the_drain_budget_is_the_literal_six_charts_derive_from` below — written in
 /// plain backticks rather than as an intra-doc link for the reason the crate
 /// docs give about any item behind a `cfg`.
-pub const DRAIN_BUDGET: Duration = Duration::from_secs(25);
+// ADR-0569's own consequences section names this exact constant as the kind
+// a configuration knob is not: a drain budget bounded by the pod's
+// termination grace period, not a value an installation varies.
+pub const DRAIN_BUDGET: Duration = Duration::from_secs(25); // ADR-0569-EXCEPTION(CC): see above.
 
 /// What became of a drain.
 #[derive(Debug)]
@@ -253,7 +256,10 @@ mod tests {
     /// not a bound any caller needs, it is the slack inside one inequality.
     #[test]
     fn the_budget_and_its_exit_margin_fit_inside_the_default_grace_period() {
-        const DEFAULT_GRACE: Duration = Duration::from_secs(30);
+        // Kubernetes' own inherited default, asserted against for the
+        // invariant the doc comment above describes — not a knob this
+        // crate, or any chart, ever sets.
+        const DEFAULT_GRACE: Duration = Duration::from_secs(30); // ADR-0569-EXCEPTION(CC): see above.
         const EXIT_MARGIN: Duration = Duration::from_secs(5);
         assert!(
             DRAIN_BUDGET.saturating_add(EXIT_MARGIN) <= DEFAULT_GRACE,
