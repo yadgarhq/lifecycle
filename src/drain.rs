@@ -106,10 +106,10 @@ use std::time::Duration;
 /// `the_drain_budget_is_the_literal_six_charts_derive_from` below — written in
 /// plain backticks rather than as an intra-doc link for the reason the crate
 /// docs give about any item behind a `cfg`.
-// ADR-0569's own consequences section names this exact constant as the kind
-// a configuration knob is not: a drain budget bounded by the pod's
-// termination grace period, not a value an installation varies.
-pub const DRAIN_BUDGET: Duration = Duration::from_secs(25); // ADR-0569-EXCEPTION(CC): see above.
+// ADR-0569's consequences name this kind of value: a drain budget bounded
+// by the pod's termination grace period is coupled to a chart value, not a
+// knob an installation varies on its own.
+pub const DRAIN_BUDGET: Duration = Duration::from_secs(25); // ADR-0569-EXCEPTION(CC): coupled to the chart's termination grace period, not an installation-varying knob.
 
 /// What became of a drain.
 #[derive(Debug)]
@@ -256,10 +256,10 @@ mod tests {
     /// not a bound any caller needs, it is the slack inside one inequality.
     #[test]
     fn the_budget_and_its_exit_margin_fit_inside_the_default_grace_period() {
-        // Kubernetes' own inherited default, asserted against for the
-        // invariant the doc comment above describes — not a knob this
-        // crate, or any chart, ever sets.
-        const DEFAULT_GRACE: Duration = Duration::from_secs(30); // ADR-0569-EXCEPTION(CC): see above.
+        // Kubernetes' inherited default, the floor a pod gets when nothing
+        // sets terminationGracePeriodSeconds. The charts set 35, which this
+        // test does not read.
+        const DEFAULT_GRACE: Duration = Duration::from_secs(30); // ADR-0569-EXCEPTION(CC): Kubernetes' inherited default — the floor when terminationGracePeriodSeconds is unset; the charts set 35 instead.
         const EXIT_MARGIN: Duration = Duration::from_secs(5);
         assert!(
             DRAIN_BUDGET.saturating_add(EXIT_MARGIN) <= DEFAULT_GRACE,
