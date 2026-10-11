@@ -10,6 +10,8 @@ use rustls_pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+#[cfg(test)]
+use super::File;
 use super::{absent, digest_of, hex, unknown, Material, Presented};
 use super::{CERTIFICATE_NOT_AFTER, WATCHED_FILES_UNREADABLE};
 
@@ -20,6 +22,18 @@ struct Leaf {
     path: PathBuf,
 }
 
+/// One leaf of a [`Presented`] kind, and the name (if any) that tells it apart
+/// from the others of that same kind.
+///
+/// `name` is `None` for the PRIMARY leaf — the one [`Inputs::fingerprint`],
+/// [`Inputs::not_after`] and `Inputs::reported` answer for, unchanged from
+/// before ledger 1417 gave a kind more than one slot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NamedLeaf {
+    name: Option<&'static str>,
+    leaf: Leaf,
+}
+
 /// One watched file and the digest it held when it was read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Watched {
@@ -28,11 +42,16 @@ struct Watched {
 }
 
 /// Everything this process read at boot, hashed as it was read.
+///
+/// `serving` and `client` each hold every leaf of that kind this process
+/// presents (ledger 1417) — ordinarily one, but a service like `iam` that also
+/// watches a broker leaf keeps that leaf beside the unnamed one rather than
+/// overwriting it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inputs {
     service: &'static str,
-    serving: Option<Leaf>,
-    client: Option<Leaf>,
+    serving: Vec<NamedLeaf>,
+    client: Vec<NamedLeaf>,
     files: Vec<Watched>,
 }
 
@@ -46,8 +65,8 @@ impl Inputs {
     pub fn new(service: &'static str) -> Self {
         Self {
             service,
-            serving: None,
-            client: None,
+            serving: Vec::new(),
+            client: Vec::new(),
             files: Vec::new(),
         }
     }
@@ -94,7 +113,7 @@ impl Inputs {
             .into_iter()
             .fold(self, |inputs, file| match file.presented {
                 None => inputs.also(file.path),
-                Some(which) => inputs.certificate(which, file.path),
+                Some(which) => inputs.certificate(which, file.name, file.path),
             })
     }
 
@@ -114,7 +133,12 @@ impl Inputs {
     /// what the listener serves. A file holding leaf-then-issuer is what
     /// cert-manager writes, and reporting the issuer's expiry keeps a gauge
     /// green for a decade while the certificate in use ages out.
-    fn certificate(mut self, which: Presented, path: &Path) -> Self {
+    ///
+    /// `name` tells this leaf apart from any others of the same `which` kind
+    /// (ledger 1417). A second call naming the SAME `(which, name)` pair
+    /// replaces that leaf, exactly as a single call used to; a second call with
+    /// a DIFFERENT name keeps both.
+    fn certificate(mut self, which: Presented, name: Option<&'static str>, path: &Path) -> Self {
         let bytes = std::fs::read(path).ok();
         let leaf = Leaf {
             der: bytes
@@ -123,11 +147,28 @@ impl Inputs {
                 .map(|der| der.to_vec()),
             path: path.to_path_buf(),
         };
-        match which {
-            Presented::Serving => self.serving = Some(leaf),
-            Presented::Client => self.client = Some(leaf),
+        let leaves = self.leaves_mut(which);
+        match leaves.iter_mut().find(|nl| nl.name == name) {
+            Some(existing) => existing.leaf = leaf,
+            None => leaves.push(NamedLeaf { name, leaf }),
         }
         self.watch(path, bytes.as_deref().map(digest_of))
+    }
+
+    /// Every leaf of `which`'s kind, in the order it was added.
+    fn leaves(&self, which: Presented) -> &[NamedLeaf] {
+        match which {
+            Presented::Serving => &self.serving,
+            Presented::Client => &self.client,
+        }
+    }
+
+    /// The mutable counterpart to `Inputs::leaves`, for `Inputs::certificate` alone.
+    fn leaves_mut(&mut self, which: Presented) -> &mut Vec<NamedLeaf> {
+        match which {
+            Presented::Serving => &mut self.serving,
+            Presented::Client => &mut self.client,
+        }
     }
 
     fn watch(mut self, path: &Path, loaded: Option<[u8; 32]>) -> Self {
@@ -235,11 +276,16 @@ impl Inputs {
         names
     }
 
+    /// The PRIMARY leaf of `which`'s kind — the unnamed one every caller
+    /// before ledger 1417 already had, and the only one [`Inputs::fingerprint`],
+    /// [`Inputs::not_after`] and `Inputs::reported` answer for. A further,
+    /// named leaf of the same kind (`iam`'s broker leaf) is invisible here;
+    /// [`Inputs::export_not_after`] is what reports it.
     fn loaded(&self, which: Presented) -> Option<&Leaf> {
-        match which {
-            Presented::Serving => self.serving.as_ref(),
-            Presented::Client => self.client.as_ref(),
-        }
+        self.leaves(which)
+            .iter()
+            .find(|nl| nl.name.is_none())
+            .map(|nl| &nl.leaf)
     }
 
     fn leaf(&self, which: Presented) -> Option<CertificateDer<'static>> {
@@ -285,207 +331,61 @@ impl Inputs {
     ///
     /// **An invented number is worse than a missing series**: a dashboard cannot
     /// tell it apart from a real one.
+    ///
+    /// **ONE GAUGE PER LEAF, NEVER ONE PER KIND** (ledger 1417). A kind with a
+    /// further, named leaf beside its primary one — `iam`'s broker leaf beside
+    /// its unnamed client leaf — gets a series each: the primary carries
+    /// `service` and `kind`, exactly as before this leaf could have a
+    /// neighbour; a named leaf carries `name` too, bounded at the names a
+    /// caller actually writes in source (D67), never at a path.
     pub fn export_not_after(&self) {
         for which in [Presented::Serving, Presented::Client] {
-            let Some(seconds) = self.not_after(which) else {
-                continue;
-            };
-            metrics::gauge!(
-                CERTIFICATE_NOT_AFTER,
-                "service" => self.service,
-                "kind" => which.label(),
-            )
-            .set(seconds as f64);
-            tracing::info!(
-                kind = which.label(),
-                not_after = seconds,
-                fingerprint = self.fingerprint(which).unwrap_or_else(unknown),
-                "certificate loaded; its expiry is exported as {CERTIFICATE_NOT_AFTER}"
-            );
+            for named in self.leaves(which) {
+                let Some(bytes) = named.leaf.der.clone() else {
+                    continue;
+                };
+                let der = CertificateDer::from(bytes);
+                let Ok((_, parsed)) = X509Certificate::from_der(&der) else {
+                    continue;
+                };
+                let seconds = parsed.validity().not_after.timestamp();
+                let fingerprint = hex(&Sha256::digest(&der));
+                match named.name {
+                    None => {
+                        metrics::gauge!(
+                            CERTIFICATE_NOT_AFTER,
+                            "service" => self.service,
+                            "kind" => which.label(),
+                        )
+                        .set(seconds as f64);
+                        tracing::info!(
+                            kind = which.label(),
+                            not_after = seconds,
+                            fingerprint,
+                            "certificate loaded; its expiry is exported as {CERTIFICATE_NOT_AFTER}"
+                        );
+                    }
+                    Some(name) => {
+                        metrics::gauge!(
+                            CERTIFICATE_NOT_AFTER,
+                            "service" => self.service,
+                            "kind" => which.label(),
+                            "name" => name,
+                        )
+                        .set(seconds as f64);
+                        tracing::info!(
+                            kind = which.label(),
+                            name,
+                            not_after = seconds,
+                            fingerprint,
+                            "certificate loaded; its expiry is exported as {CERTIFICATE_NOT_AFTER}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nothing_configured_is_empty() {
-        assert!(Inputs::new("test").is_empty());
-        assert!(!Inputs::new("test")
-            .also(Path::new("/etc/yadgar/tls.pem"))
-            .is_empty());
-    }
-
-    /// An unreadable file has no baseline OF ITS OWN, and that is now the whole
-    /// of what it means. It used to mean the SET had none.
-    #[test]
-    fn an_unreadable_input_has_no_baseline() {
-        let path = Path::new("/etc/yadgar/quokka-4d81/absent.pem");
-        let inputs = Inputs::new("test").also(path);
-        assert_eq!(inputs.unread_at_boot(), vec![path]);
-        assert_eq!(inputs.on_disk(), vec![None]);
-        assert_eq!(inputs.fingerprint(Presented::Serving), None);
-        assert_eq!(inputs.not_after(Presented::Serving), None);
-        assert_eq!(inputs.fingerprint(Presented::Client), None);
-        assert_eq!(inputs.not_after(Presented::Client), None);
-    }
-
-    /// **ONE UNREADABLE FILE LEAVES EVERY OTHER FILE'S BASELINE INTACT.** The
-    /// collapse this replaced turned the first `None` into a `None` for the set,
-    /// which is what disabled the watcher.
-    #[test]
-    fn an_unreadable_input_does_not_erase_the_baselines_beside_it() {
-        let absent = Path::new("/etc/yadgar/quokka-4d81/absent.pem");
-        let readable = Path::new("/proc/self/cmdline");
-        let inputs = Inputs::new("test").also(absent).also(readable);
-
-        assert_eq!(inputs.unread_at_boot(), vec![absent]);
-        let on_disk = inputs.on_disk();
-        assert_eq!(on_disk.len(), 2);
-        assert_eq!(on_disk[0], None, "the unreadable one, and only it");
-        assert!(on_disk[1].is_some(), "the readable one still answers");
-
-        // AND THE UNREADABLE ONE IS NOT REPORTED AS A CHANGE. `None` on both
-        // sides is "still unreadable", never "rotated".
-        assert!(inputs.differing(&on_disk).is_empty());
-        assert_eq!(
-            inputs.unreadable(&on_disk),
-            vec![absent.display().to_string()]
-        );
-    }
-
-    /// The direction that IS a change: no baseline, and bytes on disk now.
-    #[test]
-    fn a_file_with_no_baseline_that_now_reads_is_a_change() {
-        let absent = Path::new("/etc/yadgar/quokka-4d81/absent.pem");
-        let inputs = Inputs::new("test").also(absent);
-        let appeared = vec![Some(digest_of(b"material this process never loaded"))];
-
-        assert_eq!(
-            inputs.differing(&appeared),
-            vec![absent.display().to_string()]
-        );
-        assert!(inputs.unreadable(&appeared).is_empty());
-    }
-
-    #[test]
-    fn a_file_named_twice_is_watched_once() {
-        let path = Path::new("/etc/yadgar/quokka-4d81/client.pem");
-        let inputs = Inputs::new("test").also(path).also(path);
-        assert_eq!(inputs.watched(), vec![path]);
-
-        let both = Inputs::new("test")
-            .certificate(Presented::Client, path)
-            .also(path);
-        assert_eq!(both.watched(), vec![path]);
-    }
-
-    #[test]
-    fn an_absent_certificate_reads_differently_from_an_unreadable_one() {
-        assert_eq!(
-            Inputs::new("test").reported(Presented::Serving, false),
-            "none"
-        );
-
-        let configured = Inputs::new("test").certificate(
-            Presented::Serving,
-            Path::new("/etc/yadgar/quokka-4d81/absent.pem"),
-        );
-        assert_eq!(configured.reported(Presented::Serving, false), "unknown");
-        assert_eq!(configured.reported(Presented::Serving, true), "unknown");
-    }
-
-    /// A self-signed leaf, PEM. Minted per case rather than checked in, for the
-    /// reason `Cargo.toml` gives about a fixture key in a repository.
-    fn self_signed(name: &str) -> String {
-        let key = rcgen::KeyPair::generate().expect("a key pair");
-        let mut params = rcgen::CertificateParams::new(vec![name.to_string()])
-            .expect("a subject alternative name");
-        params
-            .distinguished_name
-            .push(rcgen::DnType::CommonName, name);
-        params.self_signed(&key).expect("a self-signed leaf").pem()
-    }
-
-    /// A directory of this case's own, so a stale file cannot make a broken
-    /// implementation pass.
-    fn scratch() -> PathBuf {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
-            "yadgar-lifecycle-reported-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).expect("a scratch directory");
-        root
-    }
-
-    /// **`_before` IS THE LEAF THIS PROCESS LOADED AND `_after` IS THE ONE ON
-    /// DISK**, and the rotation line is worth nothing unless they are.
-    ///
-    /// [`watch`] prints `serving_before = reported(.., false)` beside
-    /// `serving_after = reported(.., true)`, so an operator can read which
-    /// certificate the pod is leaving and which one it is restarting onto.
-    /// NOTHING PINNED IT. `reported` was exercised only for `none` and for
-    /// `unknown` — and in both of those cases the two arms answer the SAME
-    /// string, so swapping the bools at the four call sites, or reading the
-    /// loaded bytes on both sides, compiled, passed clippy and passed every
-    /// other case in this crate while printing one fingerprint twice.
-    ///
-    /// ADR-0523 makes the fingerprints an obligation of the decision, not a
-    /// decoration on the log line: "it logs the old and new fingerprints".
-    #[test]
-    fn the_boot_baseline_and_the_file_on_disk_are_reported_apart() {
-        let root = scratch();
-        let path = root.join("tls.pem");
-        let loaded = self_signed("before.yadgar.internal");
-        std::fs::write(&path, &loaded).expect("the leaf this process reads at boot");
-
-        let inputs = Inputs::new("test").certificate(Presented::Serving, &path);
-        let baseline = inputs.reported(Presented::Serving, false);
-        assert_eq!(
-            baseline.len(),
-            64,
-            "SHA-256 over the loaded leaf's DER, hex"
-        );
-        assert_eq!(
-            inputs.reported(Presented::Serving, true),
-            baseline,
-            "nothing has rotated, so both sides name the same certificate"
-        );
-
-        // WHAT KUBELET DOES TO A DIRECTORY MOUNT: the same path, other bytes.
-        let rotated_onto = self_signed("after.yadgar.internal");
-        assert_ne!(loaded, rotated_onto, "two mints must differ");
-        std::fs::write(&path, &rotated_onto).expect("the leaf cert-manager wrote");
-
-        assert_eq!(
-            inputs.reported(Presented::Serving, false),
-            baseline,
-            "`serving_before` must keep naming the leaf that was LOADED, never the file"
-        );
-        let after = inputs.reported(Presented::Serving, true);
-        assert_eq!(after.len(), 64, "SHA-256 over the rotated leaf's DER, hex");
-        assert_ne!(
-            after, baseline,
-            "`serving_after` must name the leaf on disk, or the line reports a rotation by \
-             printing one fingerprint twice"
-        );
-
-        // AND THE TWO KINDS ARE NOT EACH OTHER. One process holds both, so a
-        // `reported` that answered with the serving leaf under both labels would
-        // land on a plausible fingerprint and pass every assertion above.
-        let client = root.join("client.pem");
-        std::fs::write(&client, self_signed("caller.yadgar.internal")).expect("a client leaf");
-        let both = inputs.certificate(Presented::Client, &client);
-        assert_ne!(
-            both.reported(Presented::Client, false),
-            both.reported(Presented::Serving, false),
-            "the serving and client leaves are different certificates"
-        );
-
-        std::fs::remove_dir_all(&root).expect("the scratch directory");
-    }
-}
+mod tests;

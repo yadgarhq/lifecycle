@@ -107,6 +107,14 @@ impl Presented {
 pub struct File<'a> {
     path: &'a Path,
     presented: Option<Presented>,
+    /// `None` is the PRIMARY leaf of `presented`'s kind — the one every
+    /// existing caller already reads through [`Inputs::fingerprint`],
+    /// [`Inputs::not_after`] and `Inputs::reported` without naming anything.
+    /// `Some` is a FURTHER leaf of the same kind (ledger 1417): `iam` watches a
+    /// broker leaf this way, beside the unnamed client leaf ADR-0516 already
+    /// exports, where a single slot per kind used to let the second overwrite
+    /// the first.
+    name: Option<&'static str>,
 }
 
 impl<'a> File<'a> {
@@ -116,15 +124,38 @@ impl<'a> File<'a> {
         Self {
             path,
             presented: None,
+            name: None,
         }
     }
 
     /// A certificate this process presents. Its leaf is parsed, fingerprinted
     /// and its expiry exported.
+    ///
+    /// The PRIMARY leaf of `which`'s kind: [`Inputs::fingerprint`],
+    /// [`Inputs::not_after`] and `Inputs::reported` answer for this one. A
+    /// second call with the same `which` replaces it — use
+    /// [`File::named_certificate`] to keep both.
     pub fn certificate(which: Presented, path: &'a Path) -> Self {
         Self {
             path,
             presented: Some(which),
+            name: None,
+        }
+    }
+
+    /// A FURTHER certificate this process presents for the same [`Presented`]
+    /// kind as another, distinguished from it by a short, static `name` —
+    /// `"broker"` beside the unnamed client leaf, say.
+    ///
+    /// `name` is bounded by what a caller writes in source, never by a path or
+    /// a fingerprint (D67): it becomes the `name` label on
+    /// [`CERTIFICATE_NOT_AFTER`], so an unbounded value here would be an
+    /// unbounded label there.
+    pub fn named_certificate(which: Presented, name: &'static str, path: &'a Path) -> Self {
+        Self {
+            path,
+            presented: Some(which),
+            name: Some(name),
         }
     }
 
