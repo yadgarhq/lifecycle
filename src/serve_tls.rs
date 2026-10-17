@@ -49,6 +49,9 @@ use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::CertificateDer;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
+mod caller;
+pub use caller::{caller_common_name, leaf_common_name};
+
 /// The prefix every service reads its listener's keys under. `LISTEN` is
 /// already the variable holding the bind address, so the transport keys extend
 /// a name the process has rather than inventing a second word for the listener.

@@ -54,7 +54,18 @@ rotate = [
 # or the watcher must not pay for a gRPC stack, which is the rule the
 # `[dependencies]` comment below states. `rustls-pki-types` and `thiserror` are
 # shared with `rotate`, so they are optional once and named by both.
-serve-tls = ["dep:rustls", "dep:rustls-pki-types", "dep:thiserror", "dep:tonic"]
+#
+# `x509-parser` joins it for [`serve_tls::caller_common_name`]: a verb that
+# admits ONE caller reads the identity off the client leaf, and rustls decodes
+# no further than DER. It is the parser `rotate` already links, so a consumer
+# with both features compiles it once.
+serve-tls = [
+  "dep:rustls",
+  "dep:rustls-pki-types",
+  "dep:thiserror",
+  "dep:tonic",
+  "dep:x509-parser",
+]
 
 [dependencies]
 # NO TRANSPORT, DELIBERATELY. `drain_within` is generic over a
@@ -75,8 +86,9 @@ sha2 = { version = "0.11", optional = true }
 # leaf. The same parser tonic and rustls use, so "the first certificate in this
 # file" means the same thing here as it does to the listener.
 rustls-pki-types = { version = "1", features = ["std"], optional = true }
-# For `validity().not_after` ALONE. `rustls-pki-types` decodes PEM to DER and
-# stops there; nothing in the rustls tree will read an expiry out of the result.
+# For `validity().not_after` (`rotate`) and the client leaf's common name
+# (`serve-tls`). `rustls-pki-types` decodes PEM to DER and stops there; nothing
+# in the rustls tree will read an expiry or a subject out of the result.
 x509-parser = { version = "0.18", optional = true }
 # THE CONFIGURATION DOCUMENT, and the reason a YAML parser is here at all.
 # ADR-0570 delivers a knob as a ConfigMap mounted as a FILE, and ADR-0569 gives
@@ -164,6 +176,10 @@ required-features = ["serve-tls"]
 
 [[test]]
 name = "serve_tls_handshake"
+required-features = ["serve-tls"]
+
+[[test]]
+name = "serve_tls_caller"
 required-features = ["serve-tls"]
 
 [[test]]

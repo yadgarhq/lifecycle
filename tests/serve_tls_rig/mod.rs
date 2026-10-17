@@ -94,6 +94,23 @@ impl Authority {
         self.client_leaf(vec![ExtendedKeyUsagePurpose::ClientAuth], Validity::Current)
     }
 
+    /// A client leaf in the shape `platform` issues one: `clientAuth`, the
+    /// caller's identity as its COMMON NAME, and NO subject alternative name —
+    /// cert-manager copies neither into the other for a client leaf.
+    pub fn client_named(&self, common_name: &str) -> Leaf {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        let cert = params.signed_by(&key, &self.issuer).unwrap();
+        Leaf {
+            cert_pem: cert.pem(),
+            key_pem: key.serialize_pem(),
+        }
+    }
+
     fn leaf(&self, sans: Vec<String>, ekus: Vec<ExtendedKeyUsagePurpose>, v: Validity) -> Leaf {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(sans.clone()).unwrap();
