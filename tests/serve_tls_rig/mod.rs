@@ -94,6 +94,24 @@ impl Authority {
         self.client_leaf(vec![ExtendedKeyUsagePurpose::ClientAuth], Validity::Current)
     }
 
+    /// A client leaf in the shape `platform` issues one: `clientAuth`, the
+    /// caller's identity as its COMMON NAME, and a dNSName SAN equal to it —
+    /// `platform`'s Certificate template renders `dnsNames: [commonName]` on
+    /// every leaf (`chart/templates/certificates.yaml`).
+    pub fn client_named(&self, common_name: &str) -> Leaf {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![common_name.to_string()]).unwrap();
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        let cert = params.signed_by(&key, &self.issuer).unwrap();
+        Leaf {
+            cert_pem: cert.pem(),
+            key_pem: key.serialize_pem(),
+        }
+    }
+
     fn leaf(&self, sans: Vec<String>, ekus: Vec<ExtendedKeyUsagePurpose>, v: Validity) -> Leaf {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(sans.clone()).unwrap();

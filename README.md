@@ -130,10 +130,10 @@ Six repositories pin it: `iam`, `task`, `gateway`, `iam-db`, `task-db` and `proj
 
 ### Features
 
-| feature     | default | what it carries                                                                                       |
-| ----------- | ------- | ----------------------------------------------------------------------------------------------------- |
-| `rotate`    | on      | `rotate::watch` and everything that parses a certificate                                              |
-| `serve-tls` | off     | `serve_tls::ServerTls`: a gRPC listener's identity and its client-certificate verification (ADR-0846) |
+| feature     | default | what it carries                                                                                                                                                                              |
+| ----------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rotate`    | on      | `rotate::watch` and everything that parses a certificate                                                                                                                                     |
+| `serve-tls` | off     | `serve_tls::ServerTls`: a gRPC listener's identity and its client-certificate verification (ADR-0846); `serve_tls::caller_common_name`: which caller a verified client leaf names (ADR-0936) |
 
 `serve-tls` pulls tonic's `server` with the `tls-ring` provider and nothing else. Its keys — `LISTEN_TLS_ENABLED` (`1` or `0`) and `LISTEN_TLS_CLIENT_AUTH` (`off`, `optional` or `required`) — have no default: an absent value refuses to boot, naming the variable and the chart key (ADR-0845, ADR-0854). `optional` verifies a presented certificate but accepts a caller that presents none, so it is a staging step and not a control. `Cargo.toml` records the measurement that the feature links one crypto provider.
 
@@ -181,7 +181,7 @@ Six ways it refuses, and they are separate variants because they are separate mi
 src/lib.rs          crate docs and the re-exports
 src/rotate.rs       Configuration, Schedule, Material, File, Inputs, watch  (feature `rotate`)
 src/drain.rs        DRAIN_BUDGET, Drain, drain_within, shutdown
-src/serve_tls.rs    ServerTls, ClientAuth, server  (feature `serve-tls`)
+src/serve_tls.rs    ServerTls, ClientAuth, server, caller_common_name  (feature `serve-tls`)
 tests/common/       the kubelet-shaped mount, and stand-ins for a service's config types
 tests/rotation.rs   the watcher against real atomic ..data swaps
 tests/assembly.rs   the watch set as a value — the seam this crate exists for
