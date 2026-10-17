@@ -14,9 +14,12 @@ use x509_parser::prelude::{FromDer as _, X509Certificate};
 /// admits `seeder-caller` (ADR-0936) — has to read the identity off the leaf.
 /// Both hops read it here, so the two cannot parse it two ways.
 ///
-/// **THE COMMON NAME, NOT A SAN**, because that is where `platform` writes the
-/// identity: every client leaf it issues names `commonName: <module>-caller`
-/// and carries no subject alternative name.
+/// **THE COMMON NAME**, because that is the field `platform` declares the
+/// identity in: every client leaf it issues names `commonName: <module>-caller`.
+/// The chart's Certificate template also renders `dnsNames: [commonName]`, so
+/// the leaf carries a dNSName SAN equal to the CN. The CN is still the field
+/// read: it is the one every leaf states once, by construction of the values,
+/// while the SAN list may grow (a serving leaf adds cluster-local names).
 ///
 /// `None` when the request crossed no TLS handshake (a cleartext listener, or a
 /// handler called directly), when the listener verified no client certificate

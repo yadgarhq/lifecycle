@@ -30,7 +30,6 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::codegen::{http, Service};
 use tonic::server::NamedService;
-use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
 use serve_tls_rig::{mount, Authority, SERVED_NAME};
@@ -121,8 +120,8 @@ fn a_request_with_no_peer_chain_has_no_caller() {
 /// The header the echo handler answers with.
 const ECHO: &str = "x-caller";
 
-/// Answers every request with the caller identity read from the peer chain —
-/// the extension `Request::peer_certs()` reads, read the same way.
+/// Answers every request with the caller identity `caller_common_name` reads
+/// from the request a handler is given.
 #[derive(Clone)]
 struct Echo;
 
@@ -140,12 +139,10 @@ impl Service<http::Request<tonic::body::Body>> for Echo {
     }
 
     fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
-        let caller = req
-            .extensions()
-            .get::<TlsConnectInfo<TcpConnectInfo>>()
-            .and_then(|info| info.peer_certs())
-            .and_then(|chain| chain.first().and_then(leaf_common_name))
-            .unwrap_or_else(|| "none".to_string());
+        // THROUGH `tonic::Request`, as a generated handler receives it — so the
+        // case exercises `caller_common_name` itself, not a reimplementation.
+        let caller =
+            caller_common_name(&tonic::Request::from_http(req)).unwrap_or_else(|| "none".into());
         Box::pin(async move {
             Ok(http::Response::builder()
                 .status(200)
@@ -157,7 +154,8 @@ impl Service<http::Request<tonic::body::Body>> for Echo {
 }
 
 /// THE POINT: under `required`, the handler reads the identity the caller's
-/// leaf carries — in the shape `platform` issues, a common name and no SAN.
+/// leaf carries — in the shape `platform` issues: a common name, and a dNSName
+/// SAN equal to it.
 #[tokio::test]
 async fn a_handler_behind_a_required_listener_reads_the_caller_s_common_name() {
     let server_ca = Authority::new("serving authority");

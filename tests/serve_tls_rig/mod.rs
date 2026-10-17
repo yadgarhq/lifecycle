@@ -95,11 +95,12 @@ impl Authority {
     }
 
     /// A client leaf in the shape `platform` issues one: `clientAuth`, the
-    /// caller's identity as its COMMON NAME, and NO subject alternative name —
-    /// cert-manager copies neither into the other for a client leaf.
+    /// caller's identity as its COMMON NAME, and a dNSName SAN equal to it —
+    /// `platform`'s Certificate template renders `dnsNames: [commonName]` on
+    /// every leaf (`chart/templates/certificates.yaml`).
     pub fn client_named(&self, common_name: &str) -> Leaf {
         let key = KeyPair::generate().unwrap();
-        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        let mut params = CertificateParams::new(vec![common_name.to_string()]).unwrap();
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         params
             .distinguished_name
