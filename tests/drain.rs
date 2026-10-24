@@ -186,3 +186,26 @@ async fn a_server_that_already_stopped_drains_at_once() {
         Drain::Finished("whatever the server returned")
     ));
 }
+
+/// A SERVER THAT ENDS ON ITS OWN ENDS THE DRAIN, with nothing asking it to stop
+/// (yaadgaar #313, ledger 1334).
+///
+/// tonic's `serve_with_shutdown(addr, ..)` binds INSIDE the spawned task, so a
+/// port already in use ends that task with an error at once. `drain_within` used
+/// to await `stop` first and unconditionally, so that error sat unobserved and
+/// the process stayed up — Running, bound to nothing — until a SIGTERM or a
+/// rotation resolved `stop`. Here `stop` never resolves, and the drain must still
+/// return the server's own error inside a second.
+#[tokio::test]
+async fn a_server_that_ends_on_its_own_returns_without_a_stop_request() {
+    let (ask_to_stop, _stop_requested) = tokio::sync::oneshot::channel::<()>();
+    let bind_failed = tokio::spawn(async { Err::<(), &str>("bind failed") });
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        drain_within(bind_failed, ask_to_stop, std::future::pending(), BUDGET),
+    )
+    .await
+    .expect("drain_within waited for a stop request after the server had already ended");
+    assert!(matches!(outcome, Drain::Finished(Err("bind failed"))));
+}

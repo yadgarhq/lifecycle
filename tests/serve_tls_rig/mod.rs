@@ -30,7 +30,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tonic::codegen::{http, Service};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 
-use yadgar_lifecycle::serve_tls::{self, ServerTls, LISTEN};
+use yadgar_lifecycle::serve_tls::{self, ServerLimits, ServerTls, LISTEN};
 
 /// The name every serving leaf is issued for, and the name the rig listens on.
 pub const SERVED_NAME: &str = "localhost";
@@ -231,6 +231,22 @@ pub fn mount(server_ca: &Authority, mode: &str, client_ca_pem: Option<&str>) -> 
 /// method with `Unimplemented`, which is all a case needs: the question is
 /// whether a request reached the server at all.
 pub async fn serve(tls: Option<&ServerTls>) -> u16 {
+    serve_with(tls, &adr_1006_limits()).await
+}
+
+/// The ADR-1006 limits, read the way a chart renders them.
+pub fn adr_1006_limits() -> ServerLimits {
+    let pairs = [
+        ("LISTEN_MAX_CONCURRENT_STREAMS", "256".to_string()),
+        ("LISTEN_KEEPALIVE_INTERVAL_SECS", "30".to_string()),
+        ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "10".to_string()),
+        ("LISTEN_MAX_HEADER_LIST_BYTES", "16384".to_string()),
+    ];
+    ServerLimits::from_lookup(LISTEN, "server.limits", lookup(&pairs)).expect("in range")
+}
+
+/// [`serve`] with the given limits.
+pub async fn serve_with(tls: Option<&ServerTls>, limits: &ServerLimits) -> u16 {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((SERVED_NAME, 0))
         .await
         .unwrap()
@@ -239,7 +255,7 @@ pub async fn serve(tls: Option<&ServerTls>) -> u16 {
 
     let (port, listeners) = bind_one_port_on_every_address(&addrs).await;
     for listener in listeners {
-        let mut builder = serve_tls::server(tls).expect("a usable listener configuration");
+        let mut builder = serve_tls::server(tls, limits).expect("a usable listener configuration");
         let router = builder.add_routes(tonic::service::Routes::default());
         tokio::spawn(async move {
             let _ = router
