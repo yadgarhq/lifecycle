@@ -166,7 +166,9 @@ async fn a_handler_behind_a_required_listener_reads_the_caller_s_common_name() {
         .await
         .unwrap();
     let port = listener.local_addr().unwrap().port();
-    let router = serve_tls::server(Some(&m.tls)).unwrap().add_service(Echo);
+    let router = serve_tls::server(Some(&m.tls), &serve_tls_rig::adr_1006_limits())
+        .unwrap()
+        .add_service(Echo);
     tokio::spawn(async move {
         let _ = router
             .serve_with_incoming(TcpListenerStream::new(listener))

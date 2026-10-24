@@ -183,6 +183,14 @@ name = "serve_tls_caller"
 required-features = ["serve-tls"]
 
 [[test]]
+name = "serve_tls_limits"
+required-features = ["serve-tls"]
+
+[[test]]
+name = "serve_tls_limits_wire"
+required-features = ["serve-tls"]
+
+[[test]]
 name = "serve_tls_watch"
 required-features = ["serve-tls", "rotate"]
 

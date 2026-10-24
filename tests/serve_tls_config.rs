@@ -239,7 +239,7 @@ fn builder_refusal(ca_path: &str) -> String {
     ])
     .unwrap()
     .unwrap();
-    match tls.builder() {
+    match tls.builder(&serve_tls_rig::adr_1006_limits()) {
         Ok(_) => panic!("a verifying listener with this client CA file must refuse the boot"),
         Err(e) => e.to_string(),
     }

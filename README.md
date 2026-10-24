@@ -130,12 +130,32 @@ Six repositories pin it: `iam`, `task`, `gateway`, `iam-db`, `task-db` and `proj
 
 ### Features
 
-| feature     | default | what it carries                                                                                                                                                                              |
-| ----------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rotate`    | on      | `rotate::watch` and everything that parses a certificate                                                                                                                                     |
-| `serve-tls` | off     | `serve_tls::ServerTls`: a gRPC listener's identity and its client-certificate verification (ADR-0846); `serve_tls::caller_common_name`: which caller a verified client leaf names (ADR-0936) |
+| feature     | default | what it carries                                                                                                                                                                                                                                                                                                                                          |
+| ----------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rotate`    | on      | `rotate::watch` and everything that parses a certificate                                                                                                                                                                                                                                                                                                 |
+| `serve-tls` | off     | `serve_tls::ServerTls`: a gRPC listener's identity and its client-certificate verification (ADR-0846); `serve_tls::ServerLimits`: the stream, keepalive and header-list bounds every server is built with, read from required env keys a chart renders (ADR-1006); `serve_tls::caller_common_name`: which caller a verified client leaf names (ADR-0936) |
 
 `serve-tls` pulls tonic's `server` with the `tls-ring` provider and nothing else. Its keys — `LISTEN_TLS_ENABLED` (`1` or `0`) and `LISTEN_TLS_CLIENT_AUTH` (`off`, `optional` or `required`) — have no default: an absent value refuses to boot, naming the variable and the chart key (ADR-0845, ADR-0854). `optional` verifies a presented certificate but accepts a caller that presents none, so it is a staging step and not a control. `Cargo.toml` records the measurement that the feature links one crypto provider.
+
+### Migrating to v0.3.0 (ADR-1006)
+
+v0.3.0 breaks the `serve-tls` API and the boot contract. A consumer must make three changes in one release:
+
+- **New signatures.** `serve_tls::server(tls, &limits)` replaces `serve_tls::server(tls)`, and `ServerTls::builder(&limits)` replaces `ServerTls::builder()`. Read `limits` once at boot with `ServerLimits::from_env(LISTEN, "server.limits")`, beside `ServerTls::from_env`, and route its error through the same boot refusal.
+- **Four new REQUIRED env keys.** An absent, non-numeric or out-of-range key refuses to boot, naming the variable and the chart value. This crate holds no default (ADR-0569, ADR-0705), so the chart's `values.yaml` must carry the ADR-1006 values:
+
+  | variable                         | chart value                              | ADR-1006 default | range                       |
+  | -------------------------------- | ---------------------------------------- | ---------------- | --------------------------- |
+  | `LISTEN_MAX_CONCURRENT_STREAMS`  | `server.limits.maxConcurrentStreams`     | 256              | 1..=10000                   |
+  | `LISTEN_KEEPALIVE_INTERVAL_SECS` | `server.limits.keepaliveIntervalSeconds` | 30               | 1..=3600                    |
+  | `LISTEN_KEEPALIVE_TIMEOUT_SECS`  | `server.limits.keepaliveTimeoutSeconds`  | 10               | 1..=600, below the interval |
+  | `LISTEN_MAX_HEADER_LIST_BYTES`   | `server.limits.maxHeaderListBytes`       | 16384            | 1024..=1048576              |
+
+- **Every test harness that boots the binary** must set the four keys, or every binary test refuses to boot.
+
+`drain_within` also changed behaviour. A serving task that ends on its own, such as a failed bind, now returns `Drain::Finished` at once instead of waiting for a stop request. tonic's own error `Display` is only "transport error", so flatten the `source()` chain so that the refusal names the address and the OS reason.
+
+The connection-age bound ADR-1006 rules (30 min) is NOT in v0.3.0. On tonic 0.14.6, `max_connection_age` breaks in-flight calls (yaadgaar #417).
 
 `shutdown`, `drain_within` and `DRAIN_BUDGET` are always present. A service that only wants to hear SIGTERM adds `default-features = false` to the dependency above.
 
@@ -182,13 +202,14 @@ src/lib.rs          crate docs and the re-exports
 src/rotate.rs       Configuration, Schedule, Material, File, Inputs, watch  (feature `rotate`)
 src/drain.rs        DRAIN_BUDGET, Drain, drain_within, shutdown
 src/serve_tls.rs    ServerTls, ClientAuth, server, caller_common_name  (feature `serve-tls`)
+src/serve_tls/limits.rs  ServerLimits: ADR-1006's listener limits and their ranges
 tests/common/       the kubelet-shaped mount, and stand-ins for a service's config types
 tests/rotation.rs   the watcher against real atomic ..data swaps
 tests/assembly.rs   the watch set as a value — the seam this crate exists for
 tests/drain.rs      when the budget's clock starts
 tests/shutdown.rs   a real SIGTERM to this process, and the drain it reaches
 tests/arming.rs     WHEN the handlers are installed — a SIGTERM into an un-polled future
-tests/serve_tls_*   the client-auth modes by real handshakes, the boot refusals, the watch set
+tests/serve_tls_*   the client-auth modes by real handshakes, the boot refusals, the watch set, the limits on the wire
 ```
 
 `tests/rotation.rs` and `tests/assembly.rs` declare `required-features = ["rotate"]`, so `cargo test --no-default-features` skips them rather than failing to compile. Cargo forbids an optional dev-dependency, so the gate removes a consumer's cost and not a test build's.
