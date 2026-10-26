@@ -15,6 +15,12 @@
 //! port it held stopped accepting afterwards. A process that took SIGTERM's
 //! default disposition never reaches either assertion — it is gone.
 //!
+//! **NO REQUEST IS IN FLIGHT HERE, so this is not where an in-flight drain is
+//! held.** The rig is a bare accept loop with nothing to answer. The case that
+//! holds a real call across SIGTERM and asserts the caller gets its answer is
+//! `task`'s `tests/exit_chain.rs` (`sigterm_lets_an_in_flight_call_finish`,
+//! yaadgaar #318), where the per-binary wiring is what is under test.
+//!
 //! **ONE TEST IN ITS OWN BINARY, deliberately.** A signal is delivered to a
 //! PROCESS, not to a thread, and `cargo test` runs the tests within one file
 //! concurrently on one process. A second test here would receive this one's

@@ -50,7 +50,9 @@ use rustls_pki_types::CertificateDer;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 
 mod caller;
+mod limits;
 pub use caller::{caller_common_name, leaf_common_name};
+pub use limits::{ServerLimits, ServerLimitsError};
 
 /// The prefix every service reads its listener's keys under. `LISTEN` is
 /// already the variable holding the bind address, so the transport keys extend
@@ -327,7 +329,10 @@ impl ServerTls {
     /// yet; a binary that installs its own provider before calling `builder()`
     /// keeps it. This turns the ambiguous-features boot panic into the ring
     /// provider ADR-0846 pins.
-    pub fn builder(&self) -> Result<Server, ServeTlsError> {
+    ///
+    /// `limits` is applied to the server before TLS, exactly as [`server`]
+    /// applies it to a cleartext one (ADR-1006).
+    pub fn builder(&self, limits: &ServerLimits) -> Result<Server, ServeTlsError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let identity = Identity::from_pem(
             read(&self.cert_file, "serving certificate")?,
@@ -339,7 +344,8 @@ impl ServerTls {
                 .client_ca_root(client_ca_root(path)?)
                 .client_auth_optional(self.client_auth == ClientAuth::Optional);
         }
-        Server::builder()
+        limits
+            .apply(Server::builder())
             .tls_config(config)
             .map_err(|source| ServeTlsError::Unusable {
                 cert: self.cert_file.clone(),
@@ -353,10 +359,13 @@ impl ServerTls {
 /// a service needs, so a cleartext fallback has exactly one place it could be
 /// written. `None` is the cleartext listener `from_lookup` returned for an
 /// explicit `ENABLED=0`; `Some` is TLS, or an error, never cleartext.
-pub fn server(tls: Option<&ServerTls>) -> Result<Server, ServeTlsError> {
+///
+/// **Both arms carry `limits`** (ADR-1006): no server leaves this crate on
+/// tonic's unbounded defaults.
+pub fn server(tls: Option<&ServerTls>, limits: &ServerLimits) -> Result<Server, ServeTlsError> {
     match tls {
-        None => Ok(Server::builder()),
-        Some(tls) => tls.builder(),
+        None => Ok(limits.apply(Server::builder())),
+        Some(tls) => tls.builder(limits),
     }
 }
 

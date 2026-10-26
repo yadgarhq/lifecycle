@@ -135,6 +135,10 @@ pub enum Drain<T> {
 /// a bare accept loop — and spawned by the caller; this holds the sender. A send
 /// that fails means the server already ended on its own, which is not an error.
 ///
+/// **A server that ends on its own returns at once**, with whatever it returned
+/// and no stop request: a failed bind is `Drain::Finished(Err(..))` the moment it
+/// happens, so the caller exits non-zero instead of idling until a signal.
+///
 /// **`Overran` is not a reason to fail.** The caller logs and exits 0: the
 /// restart is the point, and a CrashLoopBackOff on top of a slow drain helps
 /// nobody. See [`DRAIN_BUDGET`] for why anything at all bounds a drain that this
@@ -150,7 +154,18 @@ pub async fn drain_within<T>(
     stop: impl std::future::Future<Output = ()>,
     budget: Duration,
 ) -> Drain<T> {
-    stop.await;
+    let mut server = server;
+    // A SERVER THAT ENDS ON ITS OWN ENDS THE DRAIN (yaadgaar #313). tonic binds
+    // inside the spawned task, so a port in use ends it with an error before
+    // anything asks it to stop; awaiting `stop` alone left that error unread and
+    // the process up, serving nothing, until SIGTERM. The budget still starts
+    // only when `stop` wins.
+    tokio::select! {
+        joined = &mut server => {
+            return Drain::Finished(joined.expect("the serving task panicked"));
+        }
+        () = stop => {}
+    }
     let _ = ask_to_stop.send(());
     match tokio::time::timeout(budget, server).await {
         Ok(joined) => Drain::Finished(joined.expect("the serving task panicked")),
