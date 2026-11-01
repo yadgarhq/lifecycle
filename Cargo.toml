@@ -2,7 +2,7 @@
 name = "yadgar-lifecycle"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "How a server process starts, stops and restarts: ADR-0523's exit-on-change rotation watcher, the SIGTERM drain, and the budget that bounds it."
 
