@@ -112,6 +112,21 @@ impl Authority {
         }
     }
 
+    /// A client leaf that names its caller in a dNSName SAN ONLY: `clientAuth`,
+    /// the SAN, and a subject with no common name. `platform` never issues one;
+    /// it is the input a SAN fallback in the caller read would accept.
+    pub fn client_san_only(&self, san: &str) -> Leaf {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![san.to_string()]).unwrap();
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.distinguished_name = rcgen::DistinguishedName::new();
+        let cert = params.signed_by(&key, &self.issuer).unwrap();
+        Leaf {
+            cert_pem: cert.pem(),
+            key_pem: key.serialize_pem(),
+        }
+    }
+
     fn leaf(&self, sans: Vec<String>, ekus: Vec<ExtendedKeyUsagePurpose>, v: Validity) -> Leaf {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(sans.clone()).unwrap();
