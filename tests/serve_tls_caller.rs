@@ -32,7 +32,7 @@ use tonic::codegen::{http, Service};
 use tonic::server::NamedService;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 
-use serve_tls_rig::{mount, Authority, SERVED_NAME};
+use serve_tls_rig::{mount, Authority, Leaf, SERVED_NAME};
 use yadgar_lifecycle::serve_tls::{self, caller_common_name, leaf_common_name};
 
 /// A self-signed certificate whose subject carries `common_names`, as DER.
@@ -61,6 +61,21 @@ fn a_leaf_s_common_name_is_its_identity() {
 #[test]
 fn a_leaf_with_no_common_name_has_no_identity() {
     assert_eq!(leaf_common_name(&der_with(&[])), None);
+}
+
+/// A NAME IN THE SAN ONLY IS NO IDENTITY. The CN is the field read, so a leaf
+/// that names its caller in a dNSName SAN and has no CN gives `None` — it is
+/// not read from the SAN instead. The case above carries no SAN at all, so a
+/// fallback to the SAN would pass it; this one carries the SAN `platform`
+/// renders (`dnsNames: [commonName]`) with the CN taken away.
+#[test]
+fn a_leaf_naming_its_caller_only_in_a_san_has_no_identity() {
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec!["project-caller".to_string()]).unwrap();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    let der = params.self_signed(&key).unwrap().der().clone();
+
+    assert_eq!(leaf_common_name(&der), None);
 }
 
 /// TWO NAMES ARE NO IDENTITY EITHER. Picking the first or the last would let
@@ -153,11 +168,10 @@ impl Service<http::Request<tonic::body::Body>> for Echo {
     }
 }
 
-/// THE POINT: under `required`, the handler reads the identity the caller's
-/// leaf carries — in the shape `platform` issues: a common name, and a dNSName
-/// SAN equal to it.
-#[tokio::test]
-async fn a_handler_behind_a_required_listener_reads_the_caller_s_common_name() {
+/// Stand a `required` listener up through `serve_tls::server`, present the
+/// leaf `mint` issues from the listener's client authority, and return what
+/// the handler read as the caller (`"none"` for no identity).
+async fn caller_read_over_required(mint: impl FnOnce(&Authority) -> Leaf) -> Option<String> {
     let server_ca = Authority::new("serving authority");
     let client_ca = Authority::new("client authority");
     let m = mount(&server_ca, "required", Some(&client_ca.pem()));
@@ -175,7 +189,7 @@ async fn a_handler_behind_a_required_listener_reads_the_caller_s_common_name() {
             .await;
     });
 
-    let leaf = client_ca.client_named("project-caller");
+    let leaf = mint(&client_ca);
     let mut channel = Endpoint::from_shared(format!("https://127.0.0.1:{port}"))
         .unwrap()
         .connect_timeout(Duration::from_secs(10))
@@ -203,8 +217,32 @@ async fn a_handler_behind_a_required_listener_reads_the_caller_s_common_name() {
         .await
         .unwrap();
     let response = channel.call(req).await.expect("answered");
+    response
+        .headers()
+        .get(ECHO)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+/// THE POINT: under `required`, the handler reads the identity the caller's
+/// leaf carries — in the shape `platform` issues: a common name, and a dNSName
+/// SAN equal to it.
+#[tokio::test]
+async fn a_handler_behind_a_required_listener_reads_the_caller_s_common_name() {
     assert_eq!(
-        response.headers().get(ECHO).and_then(|v| v.to_str().ok()),
-        Some("project-caller")
+        caller_read_over_required(|ca| ca.client_named("project-caller")).await,
+        Some("project-caller".to_string())
+    );
+}
+
+/// THE SAME HANDSHAKE, WITH THE NAME IN THE SAN ONLY: the leaf verifies, and
+/// the handler still reads no caller. The unit case above pins
+/// `leaf_common_name`; only a real handshake reaches `caller_common_name`, so
+/// only this case sees a SAN fallback added there.
+#[tokio::test]
+async fn a_handler_behind_a_required_listener_reads_no_caller_from_a_san_only_leaf() {
+    assert_eq!(
+        caller_read_over_required(|ca| ca.client_san_only("project-caller")).await,
+        Some("none".to_string())
     );
 }
