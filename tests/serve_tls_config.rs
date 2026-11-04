@@ -229,6 +229,10 @@ fn each_mode_reads_to_what_it_names() {
 /// Configure a verifying listener whose client CA file holds `contents`, and
 /// return what `builder()` refused with.
 fn builder_refusal(ca_path: &str) -> String {
+    builder_error(ca_path).to_string()
+}
+
+fn builder_error(ca_path: &str) -> ServeTlsError {
     let p = pair();
     let tls = read(&[
         ("LISTEN_TLS_ENABLED", s("1")),
@@ -241,8 +245,21 @@ fn builder_refusal(ca_path: &str) -> String {
     .unwrap();
     match tls.builder(&serve_tls_rig::adr_1006_limits()) {
         Ok(_) => panic!("a verifying listener with this client CA file must refuse the boot"),
-        Err(e) => e.to_string(),
+        Err(e) => e,
     }
+}
+
+/// Every layer's `Display`, joined the way the services' one chain flattener
+/// joins them: the error, then each `source()` below it.
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut out = error.to_string();
+    let mut next = error.source();
+    while let Some(cause) = next {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        next = cause.source();
+    }
+    out
 }
 
 /// Arm 11: an empty or non-PEM client CA file refuses at boot, naming the path.
@@ -265,17 +282,28 @@ fn an_empty_or_non_pem_client_ca_refuses_naming_the_path() {
 }
 
 /// Arm 11, the unreadable form: a client CA path that is not there names it.
+///
+/// The io reason is the `#[source]`, so `Display` names only this layer and the
+/// chain flattener renders the reason ONCE (yaadgaar #290). With the reason in
+/// both places every service's crash log printed it twice.
 #[test]
 fn a_missing_client_ca_file_refuses_naming_the_path() {
     let missing = std::env::temp_dir().join("yadgar-lifecycle-no-such-client-ca-5b1e.pem");
-    let message = builder_refusal(&missing.display().to_string());
-    assert!(
-        message.starts_with(&format!(
-            "cannot read the client CA file {}: ",
-            missing.display()
-        )),
-        "{message}"
+    let error = builder_error(&missing.display().to_string());
+    assert_eq!(
+        error.to_string(),
+        format!("cannot read the client CA file {}", missing.display())
     );
+    let reason = std::fs::read(&missing).unwrap_err().to_string();
+    let rendered = chain(&error);
+    assert_eq!(
+        rendered,
+        format!(
+            "cannot read the client CA file {}: {reason}",
+            missing.display()
+        )
+    );
+    assert_eq!(rendered.matches(&reason).count(), 1, "{rendered}");
 }
 
 /// Run `f` with a subscriber capturing every event as text, synchronously.

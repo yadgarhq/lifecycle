@@ -168,7 +168,9 @@ pub enum ServeTlsError {
         chart: String,
     },
 
-    #[error("cannot read the {what} {}: {source}", path.display())]
+    /// The io reason is the source, kept out of `Display`, so the binary's one
+    /// chain flattener renders it once (yaadgaar #290).
+    #[error("cannot read the {what} {}", path.display())]
     Unreadable {
         what: &'static str,
         path: PathBuf,
