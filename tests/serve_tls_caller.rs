@@ -63,6 +63,21 @@ fn a_leaf_with_no_common_name_has_no_identity() {
     assert_eq!(leaf_common_name(&der_with(&[])), None);
 }
 
+/// A NAME IN THE SAN ONLY IS NO IDENTITY. The CN is the field read, so a leaf
+/// that names its caller in a dNSName SAN and has no CN gives `None` — it is
+/// not read from the SAN instead. The case above carries no SAN at all, so a
+/// fallback to the SAN would pass it; this one carries the SAN `platform`
+/// renders (`dnsNames: [commonName]`) with the CN taken away.
+#[test]
+fn a_leaf_naming_its_caller_only_in_a_san_has_no_identity() {
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec!["project-caller".to_string()]).unwrap();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    let der = params.self_signed(&key).unwrap().der().clone();
+
+    assert_eq!(leaf_common_name(&der), None);
+}
+
 /// TWO NAMES ARE NO IDENTITY EITHER. Picking the first or the last would let
 /// a leaf carrying `project-caller` beside its real name pass a check by
 /// order — so an ambiguous subject is refused rather than resolved.
