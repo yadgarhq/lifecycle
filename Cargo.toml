@@ -124,20 +124,27 @@ metrics = { version = "0.24", optional = true }
 # `project-db`, `origin/main`, checked 2026-10-03), and the `-db` modules
 # already link `ring` through sqlx `tls-rustls-ring`. That is a fact about
 # those lock files today; an adopter that later pulls `aws-lc-rs` in would
-# reintroduce the panic. MEASURED for this crate 2026-10-03, not reasoned about:
+# reintroduce the panic. MEASURED for this crate 2026-10-03 (the `ring` line
+# re-measured 2026-11-06 on tonic 0.14.7), not reasoned about:
 #
 #   cargo tree -e normal --features serve-tls -i aws-lc-rs
 #     error: package ID specification `aws-lc-rs` did not match any packages
 #   cargo tree -e normal,build --all-features --target all -i aws-lc-rs
 #     error: package ID specification `aws-lc-rs` did not match any packages
 #   cargo tree -e normal --features serve-tls -i ring
-#     ring v0.17.14 <- rustls v0.23.45 <- tokio-rustls v0.26.6 <- tonic v0.14.6
+#     ring v0.17.14 <- rustls v0.23.46 <- tokio-rustls v0.26.6 <- tonic v0.14.7
 #   cargo tree -e normal -i tonic          (default features)
 #     warning: nothing to print.
 #
 # So `aws-lc-rs` is not in the lock file at all, and a consumer that does not
 # enable the feature builds no tonic.
-tonic = { version = "0.14", default-features = false, features = [
+#
+# **FLOORED AT 0.14.7, NOT "0.14".** `ServerLimits::apply` sets
+# `max_connection_age`, which panics the connection and drops calls in flight
+# on tonic 0.14.6 and earlier (tonic#2780, fixed in 0.14.7). This crate's
+# `Cargo.lock` does not reach a consumer, so the floor is what keeps a consumer
+# locked at 0.14.6 from building the setter against the broken release.
+tonic = { version = "0.14.7", default-features = false, features = [
   "server",
   "tls-ring",
 ], optional = true }
@@ -218,7 +225,7 @@ metrics-util = { version = "0.20", features = ["debugging"] }
 # `codegen` re-exports the `Service` trait the rig sends its one request with.
 # Dev-only: Cargo unifies these into the TEST build, so `cargo check --lib
 # --features serve-tls` is what proves the library builds on `server` alone.
-tonic = { version = "0.14", default-features = false, features = [
+tonic = { version = "0.14.7", default-features = false, features = [
   "channel",
   "codegen",
   "router",

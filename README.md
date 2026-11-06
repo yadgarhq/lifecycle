@@ -155,7 +155,19 @@ v0.3.0 breaks the `serve-tls` API and the boot contract. A consumer must make th
 
 `drain_within` also changed behaviour. A serving task that ends on its own, such as a failed bind, now returns `Drain::Finished` at once instead of waiting for a stop request. tonic's own error `Display` is only "transport error", so flatten the `source()` chain so that the refusal names the address and the OS reason.
 
-The connection-age bound ADR-1006 rules (30 min) is NOT in v0.3.0. On tonic 0.14.6, `max_connection_age` breaks in-flight calls (yaadgaar #417).
+The connection-age bound ADR-1006 rules (30 min) is NOT in v0.3.0. On tonic 0.14.6, `max_connection_age` breaks in-flight calls (yaadgaar #417). v0.4.0 adds it; see below.
+
+### Migrating to v0.4.0 (connection age, ADR-1006)
+
+v0.4.0 adds a fifth REQUIRED env key and applies it to every server `serve_tls::server` and `ServerTls::builder` build. A consumer chart that does not render the key refuses to boot.
+
+| variable                         | chart value                             | ADR-1006 default | range     |
+| -------------------------------- | --------------------------------------- | ---------------- | --------- |
+| `LISTEN_MAX_CONNECTION_AGE_SECS` | `server.limits.maxConnectionAgeSeconds` | 1800             | 1..=86400 |
+
+A connection older than the age is sent GOAWAY. Calls in flight on it finish, and new calls go to a fresh connection. No grace is set: in tonic 0.14.7 a grace replaces the GOAWAY with a hard close at age + grace, which drops the calls in flight.
+
+The crate now requires tonic 0.14.7 or later. Earlier releases panic the connection when the age is reached (tonic#2780). Every test harness that boots the binary must set the new key too.
 
 `shutdown`, `drain_within` and `DRAIN_BUDGET` are always present. A service that only wants to hear SIGTERM adds `default-features = false` to the dependency above.
 

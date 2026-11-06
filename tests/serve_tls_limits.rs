@@ -22,6 +22,7 @@ fn adr_1006() -> Vec<(&'static str, String)> {
         ("LISTEN_KEEPALIVE_INTERVAL_SECS", "30".into()),
         ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "10".into()),
         ("LISTEN_MAX_HEADER_LIST_BYTES", "16384".into()),
+        ("LISTEN_MAX_CONNECTION_AGE_SECS", "1800".into()),
     ]
 }
 
@@ -44,7 +45,7 @@ fn refusal(pairs: &[(&str, String)]) -> String {
         .to_string()
 }
 
-const KEYS: [(&str, &str); 4] = [
+const KEYS: [(&str, &str); 5] = [
     (
         "LISTEN_MAX_CONCURRENT_STREAMS",
         "server.limits.maxConcurrentStreams",
@@ -61,6 +62,10 @@ const KEYS: [(&str, &str); 4] = [
         "LISTEN_MAX_HEADER_LIST_BYTES",
         "server.limits.maxHeaderListBytes",
     ),
+    (
+        "LISTEN_MAX_CONNECTION_AGE_SECS",
+        "server.limits.maxConnectionAgeSeconds",
+    ),
 ];
 
 #[test]
@@ -70,6 +75,7 @@ fn the_adr_1006_values_read_to_what_they_name() {
     assert_eq!(limits.keepalive_interval(), Duration::from_secs(30));
     assert_eq!(limits.keepalive_timeout(), Duration::from_secs(10));
     assert_eq!(limits.max_header_list_bytes(), 16 * 1024);
+    assert_eq!(limits.max_connection_age(), Duration::from_secs(30 * 60));
 }
 
 #[test]
@@ -116,6 +122,10 @@ fn a_value_outside_its_range_refuses_naming_the_range() {
             "LISTEN_MAX_HEADER_LIST_BYTES",
             ServerLimits::MAX_HEADER_LIST_BYTES,
         ),
+        (
+            "LISTEN_MAX_CONNECTION_AGE_SECS",
+            ServerLimits::MAX_CONNECTION_AGE_SECS,
+        ),
     ];
     for (var, range) in ranges {
         for outside in [range.start() - 1, range.end() + 1] {
@@ -133,6 +143,7 @@ fn every_range_admits_the_adr_1006_value() {
     assert!(ServerLimits::KEEPALIVE_INTERVAL_SECS.contains(&30));
     assert!(ServerLimits::KEEPALIVE_TIMEOUT_SECS.contains(&10));
     assert!(ServerLimits::MAX_HEADER_LIST_BYTES.contains(&16384));
+    assert!(ServerLimits::MAX_CONNECTION_AGE_SECS.contains(&1800));
 }
 
 /// A keepalive whose timeout is not below its interval would send the next
@@ -174,15 +185,26 @@ fn the_ranges_are_the_literals_the_charts_check_against() {
     assert_eq!(ServerLimits::KEEPALIVE_INTERVAL_SECS, 1..=3_600);
     assert_eq!(ServerLimits::KEEPALIVE_TIMEOUT_SECS, 1..=600);
     assert_eq!(ServerLimits::MAX_HEADER_LIST_BYTES, 1_024..=1_048_576);
+    assert_eq!(ServerLimits::MAX_CONNECTION_AGE_SECS, 1..=86_400);
 }
 
-/// NO CONNECTION-AGE KEY IS READ (yaadgaar #417): tonic 0.14.6's
-/// `max_connection_age` breaks in-flight calls, so the four keys above are the
-/// whole configuration and a stale age key from an older chart changes nothing.
+/// THE CONNECTION AGE IS READ AS WHOLE SECONDS (yaadgaar #290 item 2): a
+/// value off by a unit, or read from the wrong key, would rotate connections a
+/// thousand times too often or never.
 #[test]
-fn a_connection_age_key_is_neither_required_nor_read() {
-    let mut pairs = adr_1006();
-    let without = read(&pairs).expect("four keys are the whole configuration");
-    pairs.push(("LISTEN_MAX_CONNECTION_AGE_SECS", "not even a number".into()));
-    assert_eq!(read(&pairs).expect("an age key is ignored"), without);
+fn the_connection_age_reads_whole_seconds_from_its_own_key() {
+    let pairs = with("LISTEN_MAX_CONNECTION_AGE_SECS", Some("7"));
+    assert_eq!(
+        read(&pairs).unwrap().max_connection_age(),
+        Duration::from_secs(7)
+    );
+    // Both ends of its range boot: the age has no cross-key constraint.
+    let range = ServerLimits::MAX_CONNECTION_AGE_SECS;
+    for inside in [*range.start(), *range.end()] {
+        let pairs = with("LISTEN_MAX_CONNECTION_AGE_SECS", Some(&inside.to_string()));
+        assert_eq!(
+            read(&pairs).unwrap().max_connection_age(),
+            Duration::from_secs(inside)
+        );
+    }
 }

@@ -256,12 +256,22 @@ pub fn adr_1006_limits() -> ServerLimits {
         ("LISTEN_KEEPALIVE_INTERVAL_SECS", "30".to_string()),
         ("LISTEN_KEEPALIVE_TIMEOUT_SECS", "10".to_string()),
         ("LISTEN_MAX_HEADER_LIST_BYTES", "16384".to_string()),
+        ("LISTEN_MAX_CONNECTION_AGE_SECS", "1800".to_string()),
     ];
     ServerLimits::from_lookup(LISTEN, "server.limits", lookup(&pairs)).expect("in range")
 }
 
 /// [`serve`] with the given limits.
 pub async fn serve_with(tls: Option<&ServerTls>, limits: &ServerLimits) -> u16 {
+    serve_routes_with(tls, limits, tonic::service::Routes::default()).await
+}
+
+/// [`serve_with`], answering with `routes` instead of `Routes::default()`.
+pub async fn serve_routes_with(
+    tls: Option<&ServerTls>,
+    limits: &ServerLimits,
+    routes: tonic::service::Routes,
+) -> u16 {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((SERVED_NAME, 0))
         .await
         .unwrap()
@@ -271,7 +281,7 @@ pub async fn serve_with(tls: Option<&ServerTls>, limits: &ServerLimits) -> u16 {
     let (port, listeners) = bind_one_port_on_every_address(&addrs).await;
     for listener in listeners {
         let mut builder = serve_tls::server(tls, limits).expect("a usable listener configuration");
-        let router = builder.add_routes(tonic::service::Routes::default());
+        let router = builder.add_routes(routes.clone());
         tokio::spawn(async move {
             let _ = router
                 .serve_with_incoming(TcpListenerStream::new(listener))
