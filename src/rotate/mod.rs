@@ -335,8 +335,9 @@ fn seed() -> u64 {
 }
 
 async fn never() -> ! {
-    let never: std::convert::Infallible = std::future::pending().await;
-    match never {}
+    loop {
+        std::future::pending::<()>().await;
+    }
 }
 
 fn unknown() -> String {
